@@ -13,13 +13,15 @@ import streamlit as st
 # ==================================================
 
 st.set_page_config(
-    page_title="상승전환 백테스트",
+    page_title="상승전환 백테스트 V2",
     page_icon="🧪",
     layout="wide"
 )
 
-st.title("🧪 상승전환 전략 백테스트")
-st.caption("4시간봉 기준: 과매도 이력 + Stoch RSI 전환 + 거래대금 증가 + MA 회복")
+st.title("🧪 상승전환 전략 백테스트 V2")
+st.caption(
+    "4시간봉 기준: 과매도 이력 + Stoch RSI 전환 + 거래대금 증가 + MA 회복 + V2 강화 필터"
+)
 
 
 # ==================================================
@@ -160,7 +162,11 @@ def get_top_trade_value_markets(limit=60):
 @st.cache_data(ttl=600)
 def get_ohlcv(ticker, interval="minute240", count=600):
     try:
-        df = pyupbit.get_ohlcv(ticker=ticker, interval=interval, count=count)
+        df = pyupbit.get_ohlcv(
+            ticker=ticker,
+            interval=interval,
+            count=count
+        )
 
         if df is None or df.empty:
             return None
@@ -192,6 +198,7 @@ def calculate_rsi(close, period=14):
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
+    # Wilder 방식에 가까운 RMA
     avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
 
@@ -263,7 +270,7 @@ def prepare_indicators(df):
 
 
 # ==================================================
-# 신호 판단
+# 신호 판단 V2
 # ==================================================
 
 def judge_signal_at(
@@ -272,12 +279,26 @@ def judge_signal_at(
     oversold_lookback=12,
     volume_ratio_threshold=1.3,
     max_3bar_rise=12.0,
-    max_ma20_gap=12.0,
-    min_signal_score=100,
+    max_ma20_gap=8.0,
+    min_signal_score=170,
+
+    # V2 추가 필터
+    min_required_volume_ratio=1.1,
+    max_short_k=75.0,
+    max_short_d=70.0,
+    max_middle_k=75.0,
+    min_ma20_gap=-10.0,
+    min_3bar_rise=-8.0,
 ):
     """
     idx 위치의 4시간봉 종가 기준으로 신호 판단.
     진입은 다음 봉 시가로 별도 처리.
+
+    V2 핵심:
+    - 거래대금 최소 비율 필수
+    - 단기/중기 Stoch RSI 과열 제외
+    - MA20 위/아래 과도한 이격 제외
+    - 최근 3봉 급락 제외
     """
 
     if idx < 80:
@@ -294,6 +315,7 @@ def judge_signal_at(
     # --------------------------------------------------
     # 1. 최근 과매도 이력
     # --------------------------------------------------
+
     recent = df.iloc[max(0, idx - oversold_lookback + 1):idx + 1]
 
     oversold_recent_short = (
@@ -326,15 +348,30 @@ def judge_signal_at(
         score += 35
         reasons.append("장기 과매도 이력")
 
+    # 최소한 과매도 이력 1개는 있어야 함
+    if oversold_count == 0:
+        return None
+
     # --------------------------------------------------
     # 2. 단기 Stoch RSI 전환
     # --------------------------------------------------
+
     short_k = safe_float(row["short_k"])
     short_d = safe_float(row["short_d"])
     prev_short_k = safe_float(prev["short_k"])
     prev_short_d = safe_float(prev["short_d"])
 
-    if short_k is None or short_d is None or prev_short_k is None:
+    if short_k is None or short_d is None or prev_short_k is None or prev_short_d is None:
+        return None
+
+    # --------------------------------------------------
+    # V2 필터: 단기 K/D가 이미 너무 높으면 제외
+    # --------------------------------------------------
+
+    if short_k > max_short_k:
+        return None
+
+    if short_d > max_short_d:
         return None
 
     kd_cross = short_k > short_d and prev_short_k <= prev_short_d
@@ -356,11 +393,23 @@ def judge_signal_at(
         score += 15
         reasons.append("4H 단기 K 상승 중")
 
+    # 핵심 전환 조건
+    if not (kd_above or k_recover_20):
+        return None
+
     # --------------------------------------------------
     # 3. 중기 Stoch RSI 개선
     # --------------------------------------------------
+
     middle_k = safe_float(row["middle_k"])
     prev_middle_k = safe_float(prev["middle_k"])
+
+    # --------------------------------------------------
+    # V2 필터: 중기 K가 이미 너무 높으면 제외
+    # --------------------------------------------------
+
+    if middle_k is not None and middle_k > max_middle_k:
+        return None
 
     if middle_k is not None and prev_middle_k is not None:
         if middle_k > prev_middle_k and middle_k < 80:
@@ -370,19 +419,27 @@ def judge_signal_at(
     # --------------------------------------------------
     # 4. 거래대금 증가
     # --------------------------------------------------
+
     volume_ratio = safe_float(row["volume_ratio"])
 
-    if volume_ratio is not None:
-        if volume_ratio >= volume_ratio_threshold:
-            score += 35
-            reasons.append(f"거래대금 증가 x{volume_ratio:.2f}")
-        elif volume_ratio >= 1.1:
-            score += 15
-            reasons.append(f"거래대금 완만 증가 x{volume_ratio:.2f}")
+    # --------------------------------------------------
+    # V2 필터: 거래대금비율 최소 기준 미달 제외
+    # --------------------------------------------------
+
+    if volume_ratio is None or volume_ratio < min_required_volume_ratio:
+        return None
+
+    if volume_ratio >= volume_ratio_threshold:
+        score += 35
+        reasons.append(f"거래대금 증가 x{volume_ratio:.2f}")
+    elif volume_ratio >= min_required_volume_ratio:
+        score += 15
+        reasons.append(f"거래대금 완만 증가 x{volume_ratio:.2f}")
 
     # --------------------------------------------------
     # 5. MA 회복
     # --------------------------------------------------
+
     close = safe_float(row["close"])
     ma5 = safe_float(row["ma5"])
     ma10 = safe_float(row["ma10"])
@@ -402,6 +459,7 @@ def judge_signal_at(
     # --------------------------------------------------
     # 6. MACD Histogram 개선
     # --------------------------------------------------
+
     hist = safe_float(row["macd_hist"])
     hist1 = safe_float(prev["macd_hist"])
     hist2 = safe_float(prev2["macd_hist"])
@@ -416,8 +474,9 @@ def judge_signal_at(
             reasons.append("MACD 히스토그램 개선")
 
     # --------------------------------------------------
-    # 7. 과열 방지
+    # 7. 과열 / 급락 / 이격 방지
     # --------------------------------------------------
+
     ret_3 = safe_float(row["ret_3"])
 
     if ret_3 is None:
@@ -426,8 +485,27 @@ def judge_signal_at(
     three_bar_rise_pct = ret_3 * 100
     ma20_gap_pct = ((close - ma20) / ma20) * 100 if ma20 else 0
 
+    # --------------------------------------------------
+    # V2 필터: 최근 3봉 급락 제외
+    # 예: -8% 이하 급락 중이면 Stoch RSI 반등이 나와도 제외
+    # --------------------------------------------------
+
+    if three_bar_rise_pct < min_3bar_rise:
+        return None
+
+    # --------------------------------------------------
+    # V2 필터: MA20 대비 과도한 아래/위 이격 제외
+    # --------------------------------------------------
+
+    if ma20_gap_pct < min_ma20_gap:
+        return None
+
+    if ma20_gap_pct > max_ma20_gap:
+        return None
+
     overheat = False
 
+    # 기존 상단 과열 체크
     if three_bar_rise_pct >= max_3bar_rise:
         overheat = True
         reasons.append(f"과열 제외: 3봉 상승률 {three_bar_rise_pct:.2f}%")
@@ -440,24 +518,15 @@ def judge_signal_at(
         overheat = True
         reasons.append("과열 제외: 단기/중기 Stoch RSI 과매수")
 
-    if not overheat:
-        score += 10
-        reasons.append("과열 아님")
-
-    # --------------------------------------------------
-    # 최종 조건
-    # --------------------------------------------------
-    # 최소한 과매도 이력 1개는 있어야 함
-    if oversold_count == 0:
-        return None
-
-    # 핵심 전환 조건: K>D 또는 K 20 회복
-    if not (kd_above or k_recover_20):
-        return None
-
-    # 과열이면 제외
     if overheat:
         return None
+
+    score += 10
+    reasons.append("과열 아님")
+
+    # --------------------------------------------------
+    # 최종 점수 필터
+    # --------------------------------------------------
 
     if score < min_signal_score:
         return None
@@ -486,14 +555,22 @@ def backtest_ticker(
     count=600,
     oversold_lookback=12,
     volume_ratio_threshold=1.3,
-    min_signal_score=100,
+    min_signal_score=170,
     take_profit_pct=5.0,
     stop_loss_pct=4.0,
     max_hold_bars=12,
     fee_pct=0.05,
     slippage_pct=0.05,
     max_3bar_rise=12.0,
-    max_ma20_gap=12.0,
+    max_ma20_gap=8.0,
+
+    # V2 추가 필터
+    min_required_volume_ratio=1.1,
+    max_short_k=75.0,
+    max_short_d=70.0,
+    max_middle_k=75.0,
+    min_ma20_gap=-10.0,
+    min_3bar_rise=-8.0,
 ):
     df = get_ohlcv(ticker, interval=interval, count=count)
 
@@ -522,6 +599,14 @@ def backtest_ticker(
             max_3bar_rise=max_3bar_rise,
             max_ma20_gap=max_ma20_gap,
             min_signal_score=min_signal_score,
+
+            # V2 추가 필터
+            min_required_volume_ratio=min_required_volume_ratio,
+            max_short_k=max_short_k,
+            max_short_d=max_short_d,
+            max_middle_k=max_middle_k,
+            min_ma20_gap=min_ma20_gap,
+            min_3bar_rise=min_3bar_rise,
         )
 
         if signal is None:
@@ -547,7 +632,9 @@ def backtest_ticker(
         max_gain = -999
         max_drawdown = 999
 
-        for j in range(entry_idx, min(entry_idx + max_hold_bars, len(df) - 1) + 1):
+        final_exit_j = min(entry_idx + max_hold_bars, len(df) - 1)
+
+        for j in range(entry_idx, final_exit_j + 1):
             high = float(df["high"].iloc[j])
             low = float(df["low"].iloc[j])
             close = float(df["close"].iloc[j])
@@ -584,7 +671,7 @@ def backtest_ticker(
                 break
 
             # 마지막 보유봉 청산
-            if j == min(entry_idx + max_hold_bars, len(df) - 1):
+            if j == final_exit_j:
                 exit_idx = j
                 exit_time = df.index[j]
                 exit_price = close * (1 - slippage_pct / 100)
@@ -648,6 +735,7 @@ def summarize_results(df):
         "평균최대하락률": df["최대하락률"].mean(),
         "익절비율": (df["청산사유"] == "익절").mean() * 100,
         "손절비율": df["청산사유"].isin(["손절", "SL_우선"]).mean() * 100,
+        "시간청산비율": (df["청산사유"] == "시간청산").mean() * 100,
         "평균보유봉수": df["보유봉수"].mean(),
         "Profit Factor": profit_factor,
     }
@@ -657,7 +745,7 @@ def summarize_results(df):
 # UI
 # ==================================================
 
-with st.expander("백테스트 방식 설명", expanded=False):
+with st.expander("백테스트 V2 방식 설명", expanded=False):
     st.markdown("""
 ### 검증 방식
 
@@ -671,6 +759,20 @@ with st.expander("백테스트 방식 설명", expanded=False):
 - 같은 봉에서 익절/손절 모두 닿으면 보수적으로 손절 우선 처리
 - 수수료와 슬리피지를 반영
 
+### V2에서 강화된 부분
+
+V1은 신호가 너무 많이 발생했습니다.  
+V2는 텔레그램 알림용에 가까운 품질을 만들기 위해 아래 필터를 추가했습니다.
+
+1. KRW-USDT / KRW-USDC 제외
+2. 거래대금비율 최소 기준 필수
+3. 단기 K 과열 제외
+4. 단기 D 과열 제외
+5. 중기 K 과열 제외
+6. MA20 아래 과도한 이격 제외
+7. MA20 위 과도한 이격 제외
+8. 최근 3봉 급락 제외
+
 ### 현재 검증하는 핵심 아이디어
 
 과매도 상태에서 바로 매수하는 것이 아니라,
@@ -679,11 +781,16 @@ with st.expander("백테스트 방식 설명", expanded=False):
 2. Stoch RSI가 전환되고
 3. 거래대금이 증가하고
 4. MA5/MA10을 회복하고
-5. 과열은 아닌 경우
+5. 과열은 아니고
+6. 급락 중은 아닌 경우
 
 를 검증합니다.
 """)
 
+
+# ==================================================
+# 사이드바 설정
+# ==================================================
 
 st.sidebar.header("백테스트 설정")
 
@@ -738,15 +845,95 @@ volume_ratio_threshold = st.sidebar.number_input(
     min_value=1.0,
     max_value=5.0,
     value=1.3,
-    step=0.1
+    step=0.1,
+    help="이 값 이상이면 강한 거래대금 증가 점수를 부여합니다."
 )
 
 min_signal_score = st.sidebar.number_input(
     "최소 신호 점수",
     min_value=50,
-    max_value=250,
-    value=110,
-    step=5
+    max_value=300,
+    value=170,
+    step=5,
+    help="V2 기본값은 170입니다. 텔레그램 알림용은 190 이상도 추천합니다."
+)
+
+st.sidebar.divider()
+st.sidebar.subheader("V2 강화 필터")
+
+exclude_stable = st.sidebar.checkbox(
+    "USDT/스테이블 코인 제외",
+    value=True
+)
+
+min_required_volume_ratio = st.sidebar.number_input(
+    "필수 최소 거래대금비율",
+    min_value=0.0,
+    max_value=5.0,
+    value=1.1,
+    step=0.1,
+    help="1.1이면 최근 3봉 거래대금 평균이 20봉 평균보다 10% 이상인 경우만 통과"
+)
+
+max_short_k = st.sidebar.number_input(
+    "최대 단기 K",
+    min_value=20.0,
+    max_value=100.0,
+    value=75.0,
+    step=1.0,
+    help="단기 K가 너무 높으면 이미 반등이 진행된 상태로 판단"
+)
+
+max_short_d = st.sidebar.number_input(
+    "최대 단기 D",
+    min_value=20.0,
+    max_value=100.0,
+    value=70.0,
+    step=1.0
+)
+
+max_middle_k = st.sidebar.number_input(
+    "최대 중기 K",
+    min_value=20.0,
+    max_value=100.0,
+    value=75.0,
+    step=1.0
+)
+
+min_ma20_gap = st.sidebar.number_input(
+    "최소 MA20 이격률 %",
+    min_value=-50.0,
+    max_value=0.0,
+    value=-10.0,
+    step=1.0,
+    help="MA20 대비 너무 아래에 있으면 급락 중일 가능성이 있어 제외"
+)
+
+max_ma20_gap = st.sidebar.number_input(
+    "최대 MA20 이격률 %",
+    min_value=0.0,
+    max_value=50.0,
+    value=8.0,
+    step=1.0,
+    help="MA20 대비 너무 위에 있으면 추격 위험으로 제외"
+)
+
+min_3bar_rise = st.sidebar.number_input(
+    "최소 최근 3봉 상승률 %",
+    min_value=-30.0,
+    max_value=0.0,
+    value=-8.0,
+    step=1.0,
+    help="최근 3봉 기준 -8% 이하 급락 중이면 제외"
+)
+
+max_3bar_rise = st.sidebar.number_input(
+    "과열 제외: 최근 3봉 상승률 %",
+    min_value=3.0,
+    max_value=50.0,
+    value=12.0,
+    step=1.0,
+    help="최근 3봉 기준 너무 급등한 경우 제외"
 )
 
 st.sidebar.divider()
@@ -792,24 +979,6 @@ slippage_pct = st.sidebar.number_input(
     step=0.01
 )
 
-st.sidebar.divider()
-
-max_3bar_rise = st.sidebar.number_input(
-    "과열 제외: 최근 3봉 상승률 %",
-    min_value=3.0,
-    max_value=50.0,
-    value=12.0,
-    step=1.0
-)
-
-max_ma20_gap = st.sidebar.number_input(
-    "과열 제외: MA20 이격률 %",
-    min_value=3.0,
-    max_value=50.0,
-    value=12.0,
-    step=1.0
-)
-
 request_delay = st.sidebar.number_input(
     "요청 간격 초",
     min_value=0.02,
@@ -819,7 +988,11 @@ request_delay = st.sidebar.number_input(
 )
 
 
-run = st.button("🧪 백테스트 실행", type="primary", use_container_width=True)
+# ==================================================
+# 실행
+# ==================================================
+
+run = st.button("🧪 백테스트 V2 실행", type="primary", use_container_width=True)
 
 if run:
     if scan_mode == "거래대금 상위":
@@ -834,6 +1007,11 @@ if run:
         tickers = [x for x in manual if x in all_krw]
 
     tickers = [x for x in tickers if x != "KRW-BTC"]
+
+    if exclude_stable:
+        stable_excludes = ["KRW-USDT", "KRW-USDC"]
+        tickers = [x for x in tickers if x not in stable_excludes]
+
     tickers = list(dict.fromkeys(tickers))
 
     if not tickers:
@@ -864,6 +1042,14 @@ if run:
             slippage_pct=float(slippage_pct),
             max_3bar_rise=float(max_3bar_rise),
             max_ma20_gap=float(max_ma20_gap),
+
+            # V2 추가 필터
+            min_required_volume_ratio=float(min_required_volume_ratio),
+            max_short_k=float(max_short_k),
+            max_short_d=float(max_short_d),
+            max_middle_k=float(max_middle_k),
+            min_ma20_gap=float(min_ma20_gap),
+            min_3bar_rise=float(min_3bar_rise),
         )
 
         all_results.extend(results)
@@ -875,7 +1061,17 @@ if run:
 
     if not all_results:
         st.warning("조건에 맞는 과거 신호가 없습니다.")
-        st.info("최소 신호 점수를 낮추거나, 거래대금 증가 기준을 완화하거나, 조회 캔들 수를 늘려보세요.")
+        st.info("""
+조건이 너무 강할 수 있습니다.
+
+완화 순서:
+1. 최소 신호 점수 170 → 150
+2. 필수 최소 거래대금비율 1.1 → 1.0
+3. 최대 단기K 75 → 80
+4. 최대 중기K 75 → 80
+5. 최소 MA20 이격률 -10 → -12
+6. 조회 캔들 수 700 → 1000
+""")
         st.stop()
 
     result_df = pd.DataFrame(all_results)
@@ -883,7 +1079,7 @@ if run:
 
     summary = summarize_results(result_df)
 
-    st.subheader("백테스트 요약")
+    st.subheader("백테스트 V2 요약")
 
     c1, c2, c3, c4 = st.columns(4)
 
@@ -903,15 +1099,18 @@ if run:
         st.metric("익절비율", format_pct(summary.get("익절비율")))
         st.metric("손절비율", format_pct(summary.get("손절비율")))
 
-    c5, c6, c7 = st.columns(3)
+    c5, c6, c7, c8 = st.columns(4)
 
     with c5:
-        st.metric("총합수익률", format_pct(summary.get("총합수익률")))
+        st.metric("시간청산비율", format_pct(summary.get("시간청산비율")))
 
     with c6:
-        st.metric("평균보유봉수", format_num(summary.get("평균보유봉수")))
+        st.metric("총합수익률", format_pct(summary.get("총합수익률")))
 
     with c7:
+        st.metric("평균보유봉수", format_num(summary.get("평균보유봉수")))
+
+    with c8:
         pf = summary.get("Profit Factor")
         st.metric("Profit Factor", "-" if pd.isna(pf) else f"{pf:.2f}")
 
@@ -921,13 +1120,19 @@ if run:
     win_rate = summary.get("승률", 0)
     avg_dd = summary.get("평균최대하락률", 0)
     pf = summary.get("Profit Factor", np.nan)
+    signal_count = summary.get("신호수", 0)
 
     if avg_ret > 0 and win_rate >= 50 and (not pd.isna(pf) and pf >= 1.2):
-        st.success("현재 설정은 기본적으로 긍정적인 결과입니다. 다만 기간과 대상 코인을 바꿔 추가 검증하세요.")
+        st.success("현재 V2 설정은 기본적으로 긍정적인 결과입니다. 텔레그램 알림 조건 후보로 검토할 수 있습니다.")
     elif avg_ret > 0:
-        st.info("평균수익률은 양호하지만 승률 또는 손익비가 애매합니다. 조건 조정이 필요합니다.")
+        st.info("평균수익률은 양호하지만 승률 또는 손익비가 애매합니다. 추가 조정이 필요합니다.")
     else:
-        st.warning("현재 설정은 수익성이 부족합니다. 거래대금 기준, 신호점수, 익절/손절 비율을 조정해보세요.")
+        st.warning("현재 설정은 수익성이 부족합니다. 필터 또는 익절/손절 조건을 조정하세요.")
+
+    if signal_count < 10:
+        st.warning("신호수가 너무 적습니다. 조건이 과도하게 강할 수 있습니다.")
+    elif signal_count > 300:
+        st.warning("신호수가 많습니다. 텔레그램 알림용으로는 조건을 더 강화하는 것이 좋습니다.")
 
     st.write("""
 ### 체크할 핵심 기준
@@ -937,9 +1142,10 @@ if run:
 - 평균최대하락률이 손절폭보다 과도하지 않은가?
 - Profit Factor가 1.2 이상인가?
 - 신호수가 너무 적거나 너무 많지 않은가?
+- 손절비율이 과도하게 높지 않은가?
 """)
 
-    st.subheader("백테스트 상세 결과")
+    st.subheader("백테스트 V2 상세 결과")
 
     display_df = result_df.copy()
 
@@ -975,6 +1181,7 @@ if run:
         "중기K",
         "거래대금비율",
         "MA20이격률",
+        "3봉상승률",
         "신호사유",
     ]
 
@@ -989,15 +1196,15 @@ if run:
     st.download_button(
         "CSV 다운로드",
         data=csv,
-        file_name=f"backtest_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        file_name=f"backtest_v2_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv"
     )
 
 else:
-    st.info("왼쪽 설정을 확인한 뒤 백테스트를 실행하세요.")
+    st.info("왼쪽 설정을 확인한 뒤 백테스트 V2를 실행하세요.")
 
     st.markdown("""
-## 추천 초기 설정
+## V2 추천 초기 설정
 
 처음에는 아래 설정으로 검증해보세요.
 
@@ -1005,14 +1212,41 @@ else:
 스캔 대상: 거래대금 상위 30개
 기준 봉: minute240
 조회 캔들 수: 700
+
 과매도 이력 확인 봉 수: 12
 거래대금 증가 기준: 1.3
-최소 신호 점수: 110
+최소 신호 점수: 170
+
+USDT/스테이블 코인 제외: 체크
+필수 최소 거래대금비율: 1.1
+최대 단기K: 75
+최대 단기D: 70
+최대 중기K: 75
+최소 MA20 이격률: -10%
+최대 MA20 이격률: 8%
+최소 최근 3봉 상승률: -8%
+과열 제외 최근 3봉 상승률: 12%
+
 익절: 5%
 손절: 4%
 최대 보유봉 수: 12
 수수료: 0.05%
 슬리피지: 0.05%
+```
+
+## 텔레그램 알림용 강한 설정
+
+V2 기본값보다 더 강하게 알림을 줄이고 싶으면 아래 설정도 테스트해보세요.
+
+```text
+최소 신호 점수: 190
+필수 최소 거래대금비율: 1.3
+최대 단기K: 70
+최대 단기D: 65
+최대 중기K: 70
+최소 MA20 이격률: -8%
+최대 MA20 이격률: 8%
+최소 최근 3봉 상승률: -6%
 ```
 
 ## 좋은 결과 기준
@@ -1027,13 +1261,55 @@ Profit Factor: 1.2 이상
 
 ## 결과가 안 좋으면
 
-1. 최소 신호 점수 110 → 120으로 높이기
-2. 거래대금 증가 기준 1.3 → 1.5로 높이기
-3. 손절 4% → 3% 또는 3.5%로 낮추기
-4. 익절 5% → 4% 또는 6%로 비교하기
-5. 과열 제외 MA20 이격 12% → 8%로 낮추기
+### 1. 신호가 너무 많고 수익률이 낮을 때
 
-## 이번 백테스트의 목적
+```text
+최소 신호 점수 170 → 190
+필수 최소 거래대금비율 1.1 → 1.3
+최대 단기K 75 → 70
+최대 단기D 70 → 65
+최대 중기K 75 → 70
+최대 MA20 이격률 8 → 6
+```
+
+### 2. 신호가 너무 적을 때
+
+```text
+최소 신호 점수 170 → 150
+필수 최소 거래대금비율 1.1 → 1.0
+최대 단기K 75 → 80
+최대 중기K 75 → 80
+최소 MA20 이격률 -10 → -12
+조회 캔들 수 700 → 1000
+```
+
+### 3. 승률은 좋은데 평균수익률이 낮을 때
+
+```text
+익절 5% → 6%
+손절 4% 유지
+```
+
+또는
+
+```text
+익절 4%
+손절 3%
+```
+
+두 가지를 비교해보세요.
+
+### 4. 최대하락률이 너무 클 때
+
+```text
+손절 4% → 3%
+최소 신호 점수 상향
+거래대금비율 상향
+MA20 이격 제한 강화
+최근 3봉 상승률 최소값 -8 → -6
+```
+
+## 이번 V2 백테스트의 목적
 
 ```text
 과매도 이력
@@ -1041,9 +1317,9 @@ Profit Factor: 1.2 이상
 + 거래대금 증가
 + MA5/MA10 회복
 + 과열 종목 제외
++ 급락 중인 종목 제외
++ MA20 이격 과도한 종목 제외
 ```
 
-위 조건이 실제로 수익성이 있는지 확인하는 1차 검증입니다.
+위 조건이 실제로 수익성이 있는지 확인하는 2차 검증입니다.
 """)
-
-
