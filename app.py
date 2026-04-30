@@ -20,7 +20,7 @@ st.set_page_config(
 
 st.title("🧪 상승전환 전략 백테스트 V3")
 st.caption(
-    "4시간봉 기준: 과매도 이력 + Stoch RSI 전환 + 거래대금 증가 + BTC 필터 + 캔들 품질 + MA5 기울기"
+    "과매도 이력 + Stoch RSI 전환 + 거래대금 증가 + BTC 필터 + 캔들 품질 + MA5 기울기"
 )
 
 
@@ -60,7 +60,7 @@ STOCH_RSI_SETTINGS = {
 
 
 # ==================================================
-# 기본 유틸
+# 유틸 함수
 # ==================================================
 
 def format_pct(x):
@@ -264,33 +264,25 @@ def prepare_indicators(df):
     result["value_avg20"] = result["value"].rolling(20).mean()
     result["volume_ratio"] = result["value_avg3"] / result["value_avg20"]
 
-    # ==================================================
-    # V3 캔들 품질 지표
-    # ==================================================
-
     candle_range = (result["high"] - result["low"]).replace(0, np.nan)
 
-    # 종가 위치: 1에 가까울수록 캔들 상단 마감
     result["close_position"] = (result["close"] - result["low"]) / candle_range
 
-    # 윗꼬리 비율: 낮을수록 좋음
     result["upper_wick_ratio"] = (
         result["high"] - result[["open", "close"]].max(axis=1)
     ) / candle_range
 
-    # 캔들 자체 등락률
     result["candle_return_pct"] = (
         (result["close"] - result["open"]) / result["open"]
     ) * 100
 
-    # MA5 상승 기울기
     result["ma5_slope_up"] = result["ma5"] > result["ma5"].shift(1)
 
     return result
 
 
 # ==================================================
-# V3 BTC 시장 필터
+# BTC 시장 필터
 # ==================================================
 
 @st.cache_data(ttl=600)
@@ -317,18 +309,6 @@ def check_btc_filter_at(
     btc_require_close_above_ma20=False,
     btc_require_ma5_above_ma10=False,
 ):
-    """
-    V3 BTC 4H 필터.
-
-    기본 조건:
-    - BTC 종가가 MA20 위이거나
-    - BTC 최근 3봉 하락률이 설정값보다 양호하면 통과
-
-    강한 조건:
-    - BTC 종가 > MA20 필수
-    - BTC MA5 > MA10 필수
-    """
-
     if btc_df is None or btc_df.empty:
         return False, "BTC 데이터 없음"
 
@@ -362,7 +342,7 @@ def check_btc_filter_at(
             return False, "BTC MA5 <= MA10"
 
         if close_above_ma20 or not_crashing:
-            return True, f"BTC 필터 통과 / 3봉 {btc_ret_3_pct:.2f}%"
+            return True, f"BTC 통과 / 3봉 {btc_ret_3_pct:.2f}%"
 
         return False, f"BTC 약세 / 3봉 {btc_ret_3_pct:.2f}%"
 
@@ -383,7 +363,6 @@ def judge_signal_at(
     max_ma20_gap=6.0,
     min_signal_score=200,
 
-    # V2 강화 필터
     min_required_volume_ratio=1.3,
     max_short_k=70.0,
     max_short_d=60.0,
@@ -391,24 +370,17 @@ def judge_signal_at(
     min_ma20_gap=-6.0,
     min_3bar_rise=-5.0,
 
-    # V3 BTC 필터
     btc_df=None,
     use_btc_filter=True,
     btc_min_3bar_rise=-2.5,
     btc_require_close_above_ma20=False,
     btc_require_ma5_above_ma10=False,
 
-    # V3 캔들 품질 필터
     min_close_position=0.55,
     max_upper_wick_ratio=0.45,
     max_bear_candle_pct=0.5,
     require_ma5_slope=True,
 ):
-    """
-    idx 위치의 봉 종가 기준으로 신호 판단.
-    진입은 다음 봉 시가로 처리.
-    """
-
     if idx < 80:
         return None
 
@@ -420,10 +392,7 @@ def judge_signal_at(
     score = 0
     reasons = []
 
-    # --------------------------------------------------
-    # V3. BTC 시장 필터
-    # --------------------------------------------------
-
+    # BTC 필터
     if use_btc_filter:
         btc_ok, btc_reason = check_btc_filter_at(
             btc_df=btc_df,
@@ -439,10 +408,7 @@ def judge_signal_at(
         score += 10
         reasons.append(btc_reason)
 
-    # --------------------------------------------------
-    # 1. 최근 과매도 이력
-    # --------------------------------------------------
-
+    # 과매도 이력
     recent = df.iloc[max(0, idx - oversold_lookback + 1):idx + 1]
 
     oversold_recent_short = (
@@ -478,10 +444,7 @@ def judge_signal_at(
     if oversold_count == 0:
         return None
 
-    # --------------------------------------------------
-    # 2. 단기 Stoch RSI 전환
-    # --------------------------------------------------
-
+    # 단기 Stoch RSI
     short_k = safe_float(row["short_k"])
     short_d = safe_float(row["short_d"])
     prev_short_k = safe_float(prev["short_k"])
@@ -490,7 +453,6 @@ def judge_signal_at(
     if short_k is None or short_d is None or prev_short_k is None or prev_short_d is None:
         return None
 
-    # 단기 K/D 과열 제외
     if short_k > max_short_k:
         return None
 
@@ -504,25 +466,22 @@ def judge_signal_at(
 
     if kd_cross:
         score += 30
-        reasons.append("4H 단기 K>D 골든크로스")
+        reasons.append("단기 K>D 골든크로스")
     elif kd_above:
         score += 18
-        reasons.append("4H 단기 K>D 유지")
+        reasons.append("단기 K>D 유지")
 
     if k_recover_20:
         score += 35
-        reasons.append("4H 단기 K 20 회복")
-    elif k_rising and short_k < 80:
+        reasons.append("단기 K 20 회복")
+    elif k_rising:
         score += 15
-        reasons.append("4H 단기 K 상승 중")
+        reasons.append("단기 K 상승")
 
     if not (kd_above or k_recover_20):
         return None
 
-    # --------------------------------------------------
-    # 3. 중기 Stoch RSI 개선
-    # --------------------------------------------------
-
+    # 중기 Stoch RSI
     middle_k = safe_float(row["middle_k"])
     prev_middle_k = safe_float(prev["middle_k"])
 
@@ -532,12 +491,9 @@ def judge_signal_at(
     if middle_k is not None and prev_middle_k is not None:
         if middle_k > prev_middle_k and middle_k < 80:
             score += 20
-            reasons.append("4H 중기 K 상승")
+            reasons.append("중기 K 상승")
 
-    # --------------------------------------------------
-    # 4. 거래대금 증가
-    # --------------------------------------------------
-
+    # 거래대금
     volume_ratio = safe_float(row["volume_ratio"])
 
     if volume_ratio is None or volume_ratio < min_required_volume_ratio:
@@ -546,14 +502,11 @@ def judge_signal_at(
     if volume_ratio >= volume_ratio_threshold:
         score += 35
         reasons.append(f"거래대금 증가 x{volume_ratio:.2f}")
-    elif volume_ratio >= min_required_volume_ratio:
+    else:
         score += 15
         reasons.append(f"거래대금 완만 증가 x{volume_ratio:.2f}")
 
-    # --------------------------------------------------
-    # 5. MA 회복 + V3 캔들 품질
-    # --------------------------------------------------
-
+    # MA / 캔들 품질
     close = safe_float(row["close"])
     ma5 = safe_float(row["ma5"])
     ma10 = safe_float(row["ma10"])
@@ -570,19 +523,15 @@ def judge_signal_at(
     if close_position is None or upper_wick_ratio is None or candle_return_pct is None:
         return None
 
-    # 종가가 캔들 하단에 있으면 매수세 부족
     if close_position < min_close_position:
         return None
 
-    # 윗꼬리가 너무 길면 매도압력 강함
     if upper_wick_ratio > max_upper_wick_ratio:
         return None
 
-    # 강한 음봉 제외
     if candle_return_pct < -abs(max_bear_candle_pct):
         return None
 
-    # MA5 기울기 상승 확인
     if require_ma5_slope and not ma5_slope_up:
         return None
 
@@ -603,10 +552,7 @@ def judge_signal_at(
         score += 10
         reasons.append("MA10 회복")
 
-    # --------------------------------------------------
-    # 6. MACD Histogram 개선
-    # --------------------------------------------------
-
+    # MACD
     hist = safe_float(row["macd_hist"])
     hist1 = safe_float(prev["macd_hist"])
     hist2 = safe_float(prev2["macd_hist"])
@@ -615,15 +561,12 @@ def judge_signal_at(
     if None not in [hist, hist1, hist2, hist3]:
         if hist > hist1 > hist2:
             score += 25
-            reasons.append("MACD 히스토그램 3봉 개선")
+            reasons.append("MACD 3봉 개선")
         elif hist > hist1:
             score += 10
-            reasons.append("MACD 히스토그램 개선")
+            reasons.append("MACD 개선")
 
-    # --------------------------------------------------
-    # 7. 급락 / 과열 / MA20 이격 방지
-    # --------------------------------------------------
-
+    # 급락 / 과열 / MA20 이격
     ret_3 = safe_float(row["ret_3"])
 
     if ret_3 is None:
@@ -649,10 +592,6 @@ def judge_signal_at(
 
     score += 10
     reasons.append("과열 아님")
-
-    # --------------------------------------------------
-    # 최종 점수 필터
-    # --------------------------------------------------
 
     if score < min_signal_score:
         return None
@@ -694,7 +633,6 @@ def backtest_ticker(
     max_3bar_rise=8.0,
     max_ma20_gap=6.0,
 
-    # V2 강화 필터
     min_required_volume_ratio=1.3,
     max_short_k=70.0,
     max_short_d=60.0,
@@ -702,13 +640,11 @@ def backtest_ticker(
     min_ma20_gap=-6.0,
     min_3bar_rise=-5.0,
 
-    # V3 BTC 필터
     use_btc_filter=True,
     btc_min_3bar_rise=-2.5,
     btc_require_close_above_ma20=False,
     btc_require_ma5_above_ma10=False,
 
-    # V3 캔들 품질 필터
     min_close_position=0.55,
     max_upper_wick_ratio=0.45,
     max_bear_candle_pct=0.5,
@@ -807,7 +743,6 @@ def backtest_ticker(
             hit_tp = high >= tp_price
             hit_sl = low <= sl_price
 
-            # 같은 봉에서 익절/손절 모두 닿으면 보수적으로 손절 우선
             if hit_tp and hit_sl:
                 exit_idx = j
                 exit_time = df.index[j]
@@ -904,41 +839,31 @@ def summarize_results(df):
 
 
 # ==================================================
-# UI 설명
+# 설명
 # ==================================================
 
 with st.expander("백테스트 V3 방식 설명", expanded=False):
     st.markdown("""
-### 검증 방식
+### V3 핵심
 
-- 기준 시간봉: 기본 4시간봉
-- 신호 발생: 해당 4시간봉 종가 기준
-- 진입 가격: 다음 4시간봉 시가
-- 청산 방식:
-  - 목표수익 도달
-  - 손절 도달
-  - 최대 보유봉수 도달 시 시간청산
-- 같은 봉에서 익절/손절 모두 닿으면 보수적으로 손절 우선 처리
-- 수수료와 슬리피지 반영
+V3는 V2보다 더 엄격하게 상승전환 후보를 걸러냅니다.
 
-### V3에서 추가된 핵심 필터
-
-V2는 상승전환 후보를 많이 잡는 장점이 있었지만,  
-시장 전체 하락 구간과 매도 거래량을 구분하는 능력이 부족했습니다.
-
-V3는 아래 필터를 추가했습니다.
+추가된 필터:
 
 1. BTC 4시간봉 시장 필터
-2. 신호 캔들 종가 위치 필터
+2. 신호 캔들 종가 위치
 3. 긴 윗꼬리 제외
 4. 강한 음봉 제외
-5. MA5 상승 기울기 확인
-6. 더 강한 거래대금 / K값 / MA20 이격 기본값
+5. MA5 상승 기울기
+6. 거래대금비율 강화
+7. MA20 이격률 강화
 
-### 이번 V3의 목적
+검증 방식:
 
-V2가 후보 발굴기라면,  
-V3는 텔레그램 자동 알림 후보에 더 가깝게 만드는 검증 버전입니다.
+- 신호 발생: 해당 봉 종가 기준
+- 진입: 다음 봉 시가
+- 청산: 익절, 손절, 시간청산
+- 같은 봉에서 익절/손절 모두 닿으면 보수적으로 손절 우선
 """)
 
 
@@ -971,8 +896,7 @@ manual_text = st.sidebar.text_area(
 interval = st.sidebar.selectbox(
     "기준 봉",
     ["minute240", "minute60"],
-    index=0,
-    help="우선 4시간봉 검증을 추천합니다."
+    index=0
 )
 
 count = st.sidebar.number_input(
@@ -990,8 +914,7 @@ oversold_lookback = st.sidebar.number_input(
     min_value=3,
     max_value=50,
     value=12,
-    step=1,
-    help="4시간봉 기준 12개는 약 2일입니다."
+    step=1
 )
 
 volume_ratio_threshold = st.sidebar.number_input(
@@ -999,8 +922,7 @@ volume_ratio_threshold = st.sidebar.number_input(
     min_value=1.0,
     max_value=5.0,
     value=1.3,
-    step=0.1,
-    help="이 값 이상이면 강한 거래대금 증가 점수를 부여합니다."
+    step=0.1
 )
 
 min_signal_score = st.sidebar.number_input(
@@ -1008,12 +930,11 @@ min_signal_score = st.sidebar.number_input(
     min_value=50,
     max_value=350,
     value=200,
-    step=5,
-    help="V3 기본값은 200입니다."
+    step=5
 )
 
 st.sidebar.divider()
-st.sidebar.subheader("V2/V3 강화 필터")
+st.sidebar.subheader("강화 필터")
 
 exclude_stable = st.sidebar.checkbox(
     "USDT/USDC 스테이블 코인 제외",
@@ -1025,8 +946,7 @@ min_required_volume_ratio = st.sidebar.number_input(
     min_value=0.0,
     max_value=5.0,
     value=1.3,
-    step=0.1,
-    help="1.3이면 최근 3봉 거래대금 평균이 20봉 평균보다 30% 이상인 경우만 통과"
+    step=0.1
 )
 
 max_short_k = st.sidebar.number_input(
@@ -1034,8 +954,7 @@ max_short_k = st.sidebar.number_input(
     min_value=20.0,
     max_value=100.0,
     value=70.0,
-    step=1.0,
-    help="단기 K가 너무 높으면 이미 반등이 진행된 상태로 판단"
+    step=1.0
 )
 
 max_short_d = st.sidebar.number_input(
@@ -1059,8 +978,7 @@ min_ma20_gap = st.sidebar.number_input(
     min_value=-50.0,
     max_value=0.0,
     value=-6.0,
-    step=1.0,
-    help="MA20 대비 너무 아래에 있으면 급락 중일 가능성이 있어 제외"
+    step=1.0
 )
 
 max_ma20_gap = st.sidebar.number_input(
@@ -1068,8 +986,7 @@ max_ma20_gap = st.sidebar.number_input(
     min_value=0.0,
     max_value=50.0,
     value=6.0,
-    step=1.0,
-    help="MA20 대비 너무 위에 있으면 추격 위험으로 제외"
+    step=1.0
 )
 
 min_3bar_rise = st.sidebar.number_input(
@@ -1077,26 +994,23 @@ min_3bar_rise = st.sidebar.number_input(
     min_value=-30.0,
     max_value=0.0,
     value=-5.0,
-    step=1.0,
-    help="최근 3봉 기준 급락 중이면 제외"
+    step=1.0
 )
 
 max_3bar_rise = st.sidebar.number_input(
-    "과열 제외: 최근 3봉 상승률 %",
+    "과열 제외 최근 3봉 상승률 %",
     min_value=3.0,
     max_value=50.0,
     value=8.0,
-    step=1.0,
-    help="최근 3봉 기준 너무 급등한 경우 제외"
+    step=1.0
 )
 
 st.sidebar.divider()
-st.sidebar.subheader("V3 BTC / 캔들 품질 필터")
+st.sidebar.subheader("BTC / 캔들 품질 필터")
 
 use_btc_filter = st.sidebar.checkbox(
     "BTC 4H 필터 사용",
-    value=True,
-    help="BTC가 급락 중이면 개별 코인 신호도 제외합니다."
+    value=True
 )
 
 btc_min_3bar_rise = st.sidebar.number_input(
@@ -1104,20 +1018,17 @@ btc_min_3bar_rise = st.sidebar.number_input(
     min_value=-10.0,
     max_value=5.0,
     value=-2.5,
-    step=0.5,
-    help="BTC 최근 3봉 수익률이 이 값보다 낮으면 시장 약세로 판단"
+    step=0.5
 )
 
 btc_require_close_above_ma20 = st.sidebar.checkbox(
     "BTC 종가 > MA20 필수",
-    value=False,
-    help="체크하면 더 강한 시장 필터가 됩니다."
+    value=False
 )
 
 btc_require_ma5_above_ma10 = st.sidebar.checkbox(
     "BTC MA5 > MA10 필수",
-    value=False,
-    help="체크하면 BTC 단기 추세까지 확인합니다."
+    value=False
 )
 
 min_close_position = st.sidebar.number_input(
@@ -1125,8 +1036,7 @@ min_close_position = st.sidebar.number_input(
     min_value=0.0,
     max_value=1.0,
     value=0.55,
-    step=0.05,
-    help="0.55 이상이면 종가가 캔들 중상단에 위치"
+    step=0.05
 )
 
 max_upper_wick_ratio = st.sidebar.number_input(
@@ -1134,8 +1044,7 @@ max_upper_wick_ratio = st.sidebar.number_input(
     min_value=0.0,
     max_value=1.0,
     value=0.45,
-    step=0.05,
-    help="윗꼬리가 너무 길면 위에서 매도압력이 있었다고 판단"
+    step=0.05
 )
 
 max_bear_candle_pct = st.sidebar.number_input(
@@ -1143,14 +1052,12 @@ max_bear_candle_pct = st.sidebar.number_input(
     min_value=0.0,
     max_value=5.0,
     value=0.5,
-    step=0.1,
-    help="예: 0.5면 -0.5%보다 큰 음봉은 제외"
+    step=0.1
 )
 
 require_ma5_slope = st.sidebar.checkbox(
     "MA5 상승 기울기 필수",
-    value=True,
-    help="MA5가 전봉보다 상승 중인 경우만 통과"
+    value=True
 )
 
 st.sidebar.divider()
@@ -1176,8 +1083,7 @@ max_hold_bars = st.sidebar.number_input(
     min_value=1,
     max_value=50,
     value=12,
-    step=1,
-    help="4시간봉 기준 12개는 약 2일입니다."
+    step=1
 )
 
 fee_pct = st.sidebar.number_input(
@@ -1290,17 +1196,16 @@ if run:
         st.info("""
 조건이 너무 강할 수 있습니다.
 
-완화 순서:
-1. 최소 신호 점수 200 → 180
-2. 필수 최소 거래대금비율 1.3 → 1.1
-3. 최대 단기K 70 → 75
-4. 최대 단기D 60 → 65
-5. 최대 중기K 65 → 70
-6. 최소 종가 위치 0.55 → 0.50
-7. 최대 윗꼬리 비율 0.45 → 0.55
-8. MA5 상승 기울기 필수 해제
-9. BTC 종가 > MA20 필수 체크 해제
-10. 조회 캔들 수 700 → 1000
+완화 예시:
+- 최소 신호 점수 200 → 180
+- 필수 거래대금비율 1.3 → 1.1
+- 최대 단기K 70 → 75
+- 최대 단기D 60 → 65
+- 최대 중기K 65 → 70
+- 최소 종가 위치 0.55 → 0.50
+- 최대 윗꼬리 비율 0.45 → 0.55
+- MA5 상승 기울기 필수 해제
+- 조회 캔들 수 700 → 1000
 """)
         st.stop()
 
@@ -1352,7 +1257,7 @@ if run:
     signal_count = summary.get("신호수", 0)
 
     if avg_ret > 0 and win_rate >= 50 and (not pd.isna(pf) and pf >= 1.2):
-        st.success("현재 V3 설정은 긍정적인 결과입니다. 텔레그램 알림 조건 후보로 검토할 수 있습니다.")
+        st.success("현재 V3 설정은 긍정적입니다. 텔레그램 알림 조건 후보로 검토할 수 있습니다.")
     elif avg_ret > 0:
         st.info("평균수익률은 양호하지만 승률 또는 손익비가 애매합니다. 추가 조정이 필요합니다.")
     else:
@@ -1362,19 +1267,6 @@ if run:
         st.warning("신호수가 너무 적습니다. 조건이 과도하게 강할 수 있습니다.")
     elif signal_count > 200:
         st.warning("신호수가 많습니다. 텔레그램 알림용으로는 조건을 더 강화하는 것이 좋습니다.")
-
-    st.write("""
-### 체크할 핵심 기준
-
-- 평균수익률이 양수인가?
-- 승률이 50% 이상인가?
-- Profit Factor가 1.2 이상인가?
-- 평균최대하락률이 손절폭보다 과도하지 않은가?
-- 신호수가 너무 적거나 너무 많지 않은가?
-- 손절비율이 과도하게 높지 않은가?
-- 종가위치가 충분히 높은 신호가 주로 살아남는가?
-- 윗꼬리비율이 높은 신호가 잘 제거되었는가?
-""")
 
     st.subheader("백테스트 V3 상세 결과")
 
@@ -1446,7 +1338,7 @@ else:
     st.markdown("""
 ## V3 추천 초기 설정
 
-처음에는 아래 설정으로 검증해보세요.
+처음에는 기본값 그대로 실행해보세요.
 
 ```text
 스캔 대상: 거래대금 상위 30개
@@ -1457,15 +1349,12 @@ else:
 거래대금 증가 기준: 1.3
 최소 신호 점수: 200
 
-USDT/USDC 제외: 체크
 필수 최소 거래대금비율: 1.3
 최대 단기K: 70
 최대 단기D: 60
 최대 중기K: 65
-최소 MA20 이격률: -6%
-최대 MA20 이격률: 6%
-최소 최근 3봉 상승률: -5%
-과열 제외 최근 3봉 상승률: 8%
+MA20 이격률: -6% ~ +6%
+최근 3봉 상승률: -5% ~ +8%
 
 BTC 4H 필터 사용: 체크
 BTC 최소 최근 3봉 상승률: -2.5%
@@ -1482,5 +1371,3 @@ MA5 상승 기울기 필수: 체크
 최대 보유봉 수: 12
 수수료: 0.05%
 슬리피지: 0.05%
-...
-```text
