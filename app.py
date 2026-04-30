@@ -3,24 +3,29 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
-import requests
 import pyupbit
+import requests
 import streamlit as st
 
 
 # ==================================================
-# Streamlit 기본 설정
+# Streamlit 설정
 # ==================================================
 
 st.set_page_config(
-    page_title="Stoch RSI 다중조건 코인 추천기",
-    page_icon="📊",
+    page_title="상승전환 백테스트 V3",
+    page_icon="🧪",
     layout="wide"
+)
+
+st.title("🧪 상승전환 전략 백테스트 V3")
+st.caption(
+    "4시간봉 기준: 과매도 이력 + Stoch RSI 전환 + 거래대금 증가 + BTC 필터 + 캔들 품질 + MA5 기울기"
 )
 
 
 # ==================================================
-# Stochastic RSI 설정
+# Stoch RSI 설정
 # ==================================================
 
 STOCH_RSI_SETTINGS = {
@@ -32,7 +37,6 @@ STOCH_RSI_SETTINGS = {
         "d_smooth": 3,
         "oversold": 20,
         "overbought": 80,
-        "weight": 1.0
     },
     "middle": {
         "name": "중기",
@@ -42,7 +46,6 @@ STOCH_RSI_SETTINGS = {
         "d_smooth": 6,
         "oversold": 20,
         "overbought": 80,
-        "weight": 1.5
     },
     "long": {
         "name": "장기",
@@ -52,113 +55,55 @@ STOCH_RSI_SETTINGS = {
         "d_smooth": 12,
         "oversold": 20,
         "overbought": 80,
-        "weight": 2.0
-    }
-}
-
-
-TIMEFRAME_SETTINGS = {
-    "day": {
-        "name": "일봉",
-        "interval": "day",
-        "weight": 45
     },
-    "minute240": {
-        "name": "4시간봉",
-        "interval": "minute240",
-        "weight": 35
-    },
-    "minute60": {
-        "name": "1시간봉",
-        "interval": "minute60",
-        "weight": 20
-    }
 }
-
-
-TIMEFRAME_ALL_OVERSOLD_BONUS = {
-    "day": 50,
-    "minute240": 35,
-    "minute60": 20
-}
-
-ALL_NINE_OVERSOLD_BONUS = 45
 
 
 # ==================================================
-# 기본 유틸 함수
+# 기본 유틸
 # ==================================================
 
-def format_price(price):
-    if price is None or pd.isna(price):
-        return "-"
+def format_pct(x):
     try:
-        price = float(price)
-        if price >= 1000:
-            return f"{price:,.0f}"
-        elif price >= 1:
-            return f"{price:,.2f}"
-        else:
-            return f"{price:.6f}"
+        if x is None or pd.isna(x):
+            return "-"
+        return f"{float(x):.2f}%"
     except Exception:
         return "-"
 
 
-def safe_float(value):
+def format_num(x):
     try:
-        if value is None or pd.isna(value):
+        if x is None or pd.isna(x):
+            return "-"
+        return f"{float(x):,.2f}"
+    except Exception:
+        return "-"
+
+
+def safe_float(x):
+    try:
+        if x is None or pd.isna(x):
             return None
-        return float(value)
+        return float(x)
     except Exception:
         return None
 
 
-def grade_rank(grade):
-    rank = {
-        "S+": 1,
-        "S": 2,
-        "A": 3,
-        "B": 4,
-        "C": 5,
-        "대기": 6
-    }
-    return rank.get(grade, 99)
-
-
-def get_grade_by_score(score):
-    if score >= 540:
-        return "S+"
-    elif score >= 460:
-        return "S"
-    elif score >= 360:
-        return "A"
-    elif score >= 260:
-        return "B"
-    elif score >= 160:
-        return "C"
-    else:
-        return None
-
-
 # ==================================================
-# Upbit API 함수
+# Upbit 데이터
 # ==================================================
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
 def get_krw_markets():
-    """
-    업비트 KRW 마켓 목록 조회
-    유의종목은 제외
-    """
     try:
         url = "https://api.upbit.com/v1/market/all"
-        params = {
-            "isDetails": "true"
-        }
+        params = {"isDetails": "true"}
         res = requests.get(url, params=params, timeout=10)
         data = res.json()
 
         markets = []
+
         for item in data:
             market = item.get("market", "")
             warning = item.get("market_warning", "NONE")
@@ -175,12 +120,8 @@ def get_krw_markets():
             return []
 
 
-@st.cache_data(ttl=180)
+@st.cache_data(ttl=300)
 def get_top_trade_value_markets(limit=60):
-    """
-    24시간 거래대금 상위 코인 조회
-    추천 조건이 아니라 스캔 대상 선정용
-    """
     markets = get_krw_markets()
     markets = [m for m in markets if m != "KRW-BTC"]
 
@@ -191,21 +132,20 @@ def get_top_trade_value_markets(limit=60):
 
     for i in range(0, len(markets), 100):
         batch = markets[i:i + 100]
+
         try:
             url = "https://api.upbit.com/v1/ticker"
-            params = {
-                "markets": ",".join(batch)
-            }
+            params = {"markets": ",".join(batch)}
             res = requests.get(url, params=params, timeout=10)
             data = res.json()
 
             if isinstance(data, list):
                 tickers.extend(data)
 
-            time.sleep(0.08)
+            time.sleep(0.06)
 
         except Exception:
-            time.sleep(0.2)
+            time.sleep(0.15)
 
     if not tickers:
         return markets[:limit]
@@ -219,66 +159,41 @@ def get_top_trade_value_markets(limit=60):
     return [x["market"] for x in tickers[:limit]]
 
 
-@st.cache_data(ttl=300)
-def get_ohlcv_cached(ticker, interval, count):
-    """
-    OHLCV 캐시 조회
-    """
+@st.cache_data(ttl=600)
+def get_ohlcv(ticker, interval="minute240", count=600):
     try:
         df = pyupbit.get_ohlcv(
             ticker=ticker,
             interval=interval,
             count=count
         )
+
+        if df is None or df.empty:
+            return None
+
+        df = df.copy()
+        df = df.sort_index()
+
+        if "value" not in df.columns:
+            if "close" in df.columns and "volume" in df.columns:
+                df["value"] = df["close"] * df["volume"]
+            else:
+                df["value"] = 0
+
         return df
+
     except Exception:
         return None
 
 
-@st.cache_data(ttl=120)
-def get_current_prices_batch(tickers):
-    """
-    현재가 배치 조회
-    """
-    if not tickers:
-        return {}
-
-    result = {}
-
-    for i in range(0, len(tickers), 100):
-        batch = tickers[i:i + 100]
-        try:
-            url = "https://api.upbit.com/v1/ticker"
-            params = {
-                "markets": ",".join(batch)
-            }
-            res = requests.get(url, params=params, timeout=10)
-            data = res.json()
-
-            if isinstance(data, list):
-                for item in data:
-                    result[item["market"]] = item.get("trade_price")
-
-            time.sleep(0.05)
-
-        except Exception:
-            time.sleep(0.2)
-
-    return result
-
-
 # ==================================================
-# RSI / Stochastic RSI 계산
+# 지표 계산
 # ==================================================
 
 def calculate_rsi(close, period=14):
-    """
-    Wilder 방식 RSI 계산
-    TradingView 계열 RSI와 유사한 RMA 방식
-    """
     close = close.astype(float)
-    delta = close.diff()
 
+    delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
@@ -291,530 +206,739 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_stoch_rsi(
-    df,
-    rsi_period=5,
-    stoch_period=5,
-    k_smooth=3,
-    d_smooth=3
-):
-    """
-    Stochastic RSI 계산
-    """
-    if df is None or len(df) == 0:
-        return None
+def calculate_stoch_rsi(df, setting, prefix):
+    result = df.copy()
 
-    df = df.copy()
+    rsi = calculate_rsi(result["close"], period=setting["rsi_period"])
 
-    rsi = calculate_rsi(df["close"], period=rsi_period)
-
-    rsi_min = rsi.rolling(stoch_period).min()
-    rsi_max = rsi.rolling(stoch_period).max()
+    rsi_min = rsi.rolling(setting["stoch_period"]).min()
+    rsi_max = rsi.rolling(setting["stoch_period"]).max()
 
     denominator = (rsi_max - rsi_min).replace(0, np.nan)
+    raw = 100 * ((rsi - rsi_min) / denominator)
 
-    stoch_rsi_raw = 100 * ((rsi - rsi_min) / denominator)
+    k = raw.rolling(setting["k_smooth"]).mean()
+    d = k.rolling(setting["d_smooth"]).mean()
 
-    df["rsi"] = rsi
-    df["stoch_rsi_raw"] = stoch_rsi_raw
-    df["stoch_rsi_k"] = stoch_rsi_raw.rolling(k_smooth).mean()
-    df["stoch_rsi_d"] = df["stoch_rsi_k"].rolling(d_smooth).mean()
+    result[f"{prefix}_rsi"] = rsi
+    result[f"{prefix}_raw"] = raw
+    result[f"{prefix}_k"] = k
+    result[f"{prefix}_d"] = d
 
-    return df
-
-
-def calculate_stoch_rsi_by_setting(df, setting):
-    return calculate_stoch_rsi(
-        df=df,
-        rsi_period=setting["rsi_period"],
-        stoch_period=setting["stoch_period"],
-        k_smooth=setting["k_smooth"],
-        d_smooth=setting["d_smooth"]
-    )
+    return result
 
 
-# ==================================================
-# BTC MA20 필터
-# ==================================================
+def calculate_macd(df, fast=12, slow=26, signal=9):
+    result = df.copy()
 
-def get_btc_ma20_status(warning_gap=0.3):
-    """
-    BTC 일봉 MA20 상태 확인
-    """
-    try:
-        df = get_ohlcv_cached("KRW-BTC", "day", 80)
-        current_price = pyupbit.get_current_price("KRW-BTC")
+    ema_fast = result["close"].ewm(span=fast, adjust=False).mean()
+    ema_slow = result["close"].ewm(span=slow, adjust=False).mean()
 
-        if df is None or len(df) < 30 or current_price is None:
-            return {
-                "ok": False,
-                "status": "BTC 데이터 부족",
-                "current_price": current_price,
-                "live_ma20": None,
-                "gap_rate": None,
-                "reason": "BTC 데이터 조회 실패"
-            }
+    macd = ema_fast - ema_slow
+    macd_signal = macd.ewm(span=signal, adjust=False).mean()
+    hist = macd - macd_signal
 
-        closes = df["close"].copy()
+    result["macd"] = macd
+    result["macd_signal"] = macd_signal
+    result["macd_hist"] = hist
 
-        prev_close = closes.iloc[-2]
-        prev_ma20 = closes.iloc[-21:-1].mean()
-
-        live_ma20 = pd.concat([
-            closes.iloc[-20:-1],
-            pd.Series([current_price])
-        ]).mean()
-
-        confirmed_above = prev_close > prev_ma20
-        live_above = current_price > live_ma20
-
-        gap_rate = ((current_price - live_ma20) / live_ma20) * 100
-
-        if confirmed_above and live_above:
-            if gap_rate >= warning_gap:
-                status = "MA20 위 유지"
-                ok = True
-            else:
-                status = "MA20 근접 주의"
-                ok = True
-
-        elif confirmed_above and not live_above:
-            status = "MA20 이탈중, 미확정"
-            ok = False
-
-        elif not confirmed_above and live_above:
-            status = "MA20 재돌파 시도중"
-            ok = False
-
-        else:
-            status = "MA20 아래"
-            ok = False
-
-        return {
-            "ok": ok,
-            "status": status,
-            "current_price": float(current_price),
-            "live_ma20": float(live_ma20),
-            "gap_rate": float(gap_rate),
-            "prev_close": float(prev_close),
-            "prev_ma20": float(prev_ma20),
-            "reason": status
-        }
-
-    except Exception as e:
-        return {
-            "ok": False,
-            "status": "BTC 필터 오류",
-            "current_price": None,
-            "live_ma20": None,
-            "gap_rate": None,
-            "reason": str(e)
-        }
+    return result
 
 
-# ==================================================
-# Stoch RSI 상태 판단
-# ==================================================
+def prepare_indicators(df):
+    result = df.copy()
 
-def judge_stochrsi_state(df, setting, oversold_mode="both"):
-    """
-    특정 시간봉 + 특정 세팅의 현재 Stoch RSI 상태 판단
+    for key, setting in STOCH_RSI_SETTINGS.items():
+        result = calculate_stoch_rsi(result, setting, key)
 
-    oversold_mode:
-    - both: K와 D 모두 20 이하일 때 과매도
-    - either: K 또는 D 하나만 20 이하이어도 과매도
-    """
-    calc = calculate_stoch_rsi_by_setting(df, setting)
+    result = calculate_macd(result)
 
-    if calc is None:
-        return {
-            "ok": False,
-            "oversold": False,
-            "overbought": False,
-            "k": None,
-            "d": None,
-            "rsi": None,
-            "reason": "데이터 없음"
-        }
+    result["ma5"] = result["close"].rolling(5).mean()
+    result["ma10"] = result["close"].rolling(10).mean()
+    result["ma20"] = result["close"].rolling(20).mean()
 
-    calc = calc.dropna().copy()
+    result["ret_1"] = result["close"].pct_change()
+    result["ret_3"] = result["close"].pct_change(3)
 
-    if len(calc) == 0:
-        return {
-            "ok": False,
-            "oversold": False,
-            "overbought": False,
-            "k": None,
-            "d": None,
-            "rsi": None,
-            "reason": "Stoch RSI 계산 데이터 부족"
-        }
+    result["value_avg3"] = result["value"].rolling(3).mean()
+    result["value_avg20"] = result["value"].rolling(20).mean()
+    result["volume_ratio"] = result["value_avg3"] / result["value_avg20"]
 
-    last = calc.iloc[-1]
+    # ==================================================
+    # V3 캔들 품질 지표
+    # ==================================================
 
-    k = safe_float(last["stoch_rsi_k"])
-    d = safe_float(last["stoch_rsi_d"])
-    rsi = safe_float(last["rsi"])
+    candle_range = (result["high"] - result["low"]).replace(0, np.nan)
 
-    if k is None or d is None:
-        return {
-            "ok": False,
-            "oversold": False,
-            "overbought": False,
-            "k": k,
-            "d": d,
-            "rsi": rsi,
-            "reason": "K/D 계산 불가"
-        }
+    # 종가 위치: 1에 가까울수록 캔들 상단 마감
+    result["close_position"] = (result["close"] - result["low"]) / candle_range
 
-    oversold_value = setting["oversold"]
-    overbought_value = setting["overbought"]
+    # 윗꼬리 비율: 낮을수록 좋음
+    result["upper_wick_ratio"] = (
+        result["high"] - result[["open", "close"]].max(axis=1)
+    ) / candle_range
 
-    if oversold_mode == "either":
-        is_oversold = k <= oversold_value or d <= oversold_value
-    else:
-        is_oversold = k <= oversold_value and d <= oversold_value
+    # 캔들 자체 등락률
+    result["candle_return_pct"] = (
+        (result["close"] - result["open"]) / result["open"]
+    ) * 100
 
-    is_overbought = k >= overbought_value or d >= overbought_value
-
-    if is_oversold:
-        state_text = "과매도"
-    elif is_overbought:
-        state_text = "과매수"
-    else:
-        state_text = "중립"
-
-    return {
-        "ok": True,
-        "oversold": bool(is_oversold),
-        "overbought": bool(is_overbought),
-        "k": k,
-        "d": d,
-        "rsi": rsi,
-        "reason": f"{state_text} / K {k:.2f} / D {d:.2f} / RSI {rsi:.2f}"
-    }
-
-
-def analyze_timeframe_all_settings(df, oversold_mode="both"):
-    """
-    하나의 시간봉에 대해 단기/중기/장기 Stoch RSI 분석
-    """
-    result = {}
-
-    for setting_key, setting in STOCH_RSI_SETTINGS.items():
-        result[setting_key] = judge_stochrsi_state(
-            df=df,
-            setting=setting,
-            oversold_mode=oversold_mode
-        )
+    # MA5 상승 기울기
+    result["ma5_slope_up"] = result["ma5"] > result["ma5"].shift(1)
 
     return result
 
 
 # ==================================================
-# 점수 계산
+# V3 BTC 시장 필터
 # ==================================================
 
-def calculate_multi_stochrsi_score(analysis):
-    """
-    일봉 / 4시간봉 / 1시간봉
-    단기 / 중기 / 장기
+@st.cache_data(ttl=600)
+def get_btc_indicator_df(interval="minute240", count=800):
+    df = get_ohlcv("KRW-BTC", interval=interval, count=count)
 
-    총 9개 조건을 점수화
+    if df is None or df.empty:
+        return None
+
+    result = df.copy().sort_index()
+
+    result["ma5"] = result["close"].rolling(5).mean()
+    result["ma10"] = result["close"].rolling(10).mean()
+    result["ma20"] = result["close"].rolling(20).mean()
+    result["ret_3"] = result["close"].pct_change(3)
+
+    return result.dropna().copy()
+
+
+def check_btc_filter_at(
+    btc_df,
+    signal_time,
+    btc_min_3bar_rise=-2.5,
+    btc_require_close_above_ma20=False,
+    btc_require_ma5_above_ma10=False,
+):
     """
+    V3 BTC 4H 필터.
+
+    기본 조건:
+    - BTC 종가가 MA20 위이거나
+    - BTC 최근 3봉 하락률이 설정값보다 양호하면 통과
+
+    강한 조건:
+    - BTC 종가 > MA20 필수
+    - BTC MA5 > MA10 필수
+    """
+
+    if btc_df is None or btc_df.empty:
+        return False, "BTC 데이터 없음"
+
+    try:
+        pos = btc_df.index.get_indexer([signal_time], method="ffill")[0]
+
+        if pos < 0:
+            return False, "BTC 매칭 실패"
+
+        row = btc_df.iloc[pos]
+
+        btc_close = safe_float(row["close"])
+        btc_ma5 = safe_float(row["ma5"])
+        btc_ma10 = safe_float(row["ma10"])
+        btc_ma20 = safe_float(row["ma20"])
+        btc_ret_3 = safe_float(row["ret_3"])
+
+        if None in [btc_close, btc_ma5, btc_ma10, btc_ma20, btc_ret_3]:
+            return False, "BTC 지표 부족"
+
+        btc_ret_3_pct = btc_ret_3 * 100
+
+        close_above_ma20 = btc_close > btc_ma20
+        ma5_above_ma10 = btc_ma5 > btc_ma10
+        not_crashing = btc_ret_3_pct > btc_min_3bar_rise
+
+        if btc_require_close_above_ma20 and not close_above_ma20:
+            return False, f"BTC MA20 아래 / 3봉 {btc_ret_3_pct:.2f}%"
+
+        if btc_require_ma5_above_ma10 and not ma5_above_ma10:
+            return False, "BTC MA5 <= MA10"
+
+        if close_above_ma20 or not_crashing:
+            return True, f"BTC 필터 통과 / 3봉 {btc_ret_3_pct:.2f}%"
+
+        return False, f"BTC 약세 / 3봉 {btc_ret_3_pct:.2f}%"
+
+    except Exception as e:
+        return False, f"BTC 필터 오류: {e}"
+
+
+# ==================================================
+# 신호 판단 V3
+# ==================================================
+
+def judge_signal_at(
+    df,
+    idx,
+    oversold_lookback=12,
+    volume_ratio_threshold=1.3,
+    max_3bar_rise=8.0,
+    max_ma20_gap=6.0,
+    min_signal_score=200,
+
+    # V2 강화 필터
+    min_required_volume_ratio=1.3,
+    max_short_k=70.0,
+    max_short_d=60.0,
+    max_middle_k=65.0,
+    min_ma20_gap=-6.0,
+    min_3bar_rise=-5.0,
+
+    # V3 BTC 필터
+    btc_df=None,
+    use_btc_filter=True,
+    btc_min_3bar_rise=-2.5,
+    btc_require_close_above_ma20=False,
+    btc_require_ma5_above_ma10=False,
+
+    # V3 캔들 품질 필터
+    min_close_position=0.55,
+    max_upper_wick_ratio=0.45,
+    max_bear_candle_pct=0.5,
+    require_ma5_slope=True,
+):
+    """
+    idx 위치의 봉 종가 기준으로 신호 판단.
+    진입은 다음 봉 시가로 처리.
+    """
+
+    if idx < 80:
+        return None
+
+    row = df.iloc[idx]
+    prev = df.iloc[idx - 1]
+    prev2 = df.iloc[idx - 2]
+    prev3 = df.iloc[idx - 3]
+
     score = 0
-    oversold_count = 0
-    total_count = 0
+    reasons = []
 
-    timeframe_summary = {}
+    # --------------------------------------------------
+    # V3. BTC 시장 필터
+    # --------------------------------------------------
 
-    for tf_key, tf_info in TIMEFRAME_SETTINGS.items():
-        tf_weight = tf_info["weight"]
+    if use_btc_filter:
+        btc_ok, btc_reason = check_btc_filter_at(
+            btc_df=btc_df,
+            signal_time=df.index[idx],
+            btc_min_3bar_rise=btc_min_3bar_rise,
+            btc_require_close_above_ma20=btc_require_close_above_ma20,
+            btc_require_ma5_above_ma10=btc_require_ma5_above_ma10,
+        )
 
-        tf_oversold_count = 0
-        tf_total_count = 0
+        if not btc_ok:
+            return None
 
-        for setting_key, setting in STOCH_RSI_SETTINGS.items():
-            total_count += 1
-            tf_total_count += 1
+        score += 10
+        reasons.append(btc_reason)
 
-            state = analysis[tf_key][setting_key]
+    # --------------------------------------------------
+    # 1. 최근 과매도 이력
+    # --------------------------------------------------
 
-            if state["oversold"]:
-                point = tf_weight * setting["weight"]
-                score += point
+    recent = df.iloc[max(0, idx - oversold_lookback + 1):idx + 1]
 
-                oversold_count += 1
-                tf_oversold_count += 1
+    oversold_recent_short = (
+        (recent["short_k"] <= 20) | (recent["short_d"] <= 20)
+    ).any()
 
-        # 해당 시간봉에서 단기/중기/장기 모두 과매도이면 보너스
-        if tf_oversold_count == tf_total_count:
-            score += TIMEFRAME_ALL_OVERSOLD_BONUS.get(tf_key, 0)
+    oversold_recent_middle = (
+        (recent["middle_k"] <= 20) | (recent["middle_d"] <= 20)
+    ).any()
 
-        timeframe_summary[tf_key] = {
-            "oversold_count": tf_oversold_count,
-            "total_count": tf_total_count
-        }
+    oversold_recent_long = (
+        (recent["long_k"] <= 20) | (recent["long_d"] <= 20)
+    ).any()
 
-    # 전체 9개 모두 과매도이면 최고 보너스
-    if oversold_count == total_count:
-        score += ALL_NINE_OVERSOLD_BONUS
+    oversold_count = sum([
+        bool(oversold_recent_short),
+        bool(oversold_recent_middle),
+        bool(oversold_recent_long),
+    ])
+
+    if oversold_recent_short:
+        score += 25
+        reasons.append("단기 과매도 이력")
+
+    if oversold_recent_middle:
+        score += 30
+        reasons.append("중기 과매도 이력")
+
+    if oversold_recent_long:
+        score += 35
+        reasons.append("장기 과매도 이력")
+
+    if oversold_count == 0:
+        return None
+
+    # --------------------------------------------------
+    # 2. 단기 Stoch RSI 전환
+    # --------------------------------------------------
+
+    short_k = safe_float(row["short_k"])
+    short_d = safe_float(row["short_d"])
+    prev_short_k = safe_float(prev["short_k"])
+    prev_short_d = safe_float(prev["short_d"])
+
+    if short_k is None or short_d is None or prev_short_k is None or prev_short_d is None:
+        return None
+
+    # 단기 K/D 과열 제외
+    if short_k > max_short_k:
+        return None
+
+    if short_d > max_short_d:
+        return None
+
+    kd_cross = short_k > short_d and prev_short_k <= prev_short_d
+    kd_above = short_k > short_d
+    k_recover_20 = prev_short_k <= 20 and short_k > 20
+    k_rising = short_k > prev_short_k
+
+    if kd_cross:
+        score += 30
+        reasons.append("4H 단기 K>D 골든크로스")
+    elif kd_above:
+        score += 18
+        reasons.append("4H 단기 K>D 유지")
+
+    if k_recover_20:
+        score += 35
+        reasons.append("4H 단기 K 20 회복")
+    elif k_rising and short_k < 80:
+        score += 15
+        reasons.append("4H 단기 K 상승 중")
+
+    if not (kd_above or k_recover_20):
+        return None
+
+    # --------------------------------------------------
+    # 3. 중기 Stoch RSI 개선
+    # --------------------------------------------------
+
+    middle_k = safe_float(row["middle_k"])
+    prev_middle_k = safe_float(prev["middle_k"])
+
+    if middle_k is not None and middle_k > max_middle_k:
+        return None
+
+    if middle_k is not None and prev_middle_k is not None:
+        if middle_k > prev_middle_k and middle_k < 80:
+            score += 20
+            reasons.append("4H 중기 K 상승")
+
+    # --------------------------------------------------
+    # 4. 거래대금 증가
+    # --------------------------------------------------
+
+    volume_ratio = safe_float(row["volume_ratio"])
+
+    if volume_ratio is None or volume_ratio < min_required_volume_ratio:
+        return None
+
+    if volume_ratio >= volume_ratio_threshold:
+        score += 35
+        reasons.append(f"거래대금 증가 x{volume_ratio:.2f}")
+    elif volume_ratio >= min_required_volume_ratio:
+        score += 15
+        reasons.append(f"거래대금 완만 증가 x{volume_ratio:.2f}")
+
+    # --------------------------------------------------
+    # 5. MA 회복 + V3 캔들 품질
+    # --------------------------------------------------
+
+    close = safe_float(row["close"])
+    ma5 = safe_float(row["ma5"])
+    ma10 = safe_float(row["ma10"])
+    ma20 = safe_float(row["ma20"])
+
+    if close is None or ma5 is None or ma10 is None or ma20 is None:
+        return None
+
+    close_position = safe_float(row.get("close_position"))
+    upper_wick_ratio = safe_float(row.get("upper_wick_ratio"))
+    candle_return_pct = safe_float(row.get("candle_return_pct"))
+    ma5_slope_up = bool(row.get("ma5_slope_up"))
+
+    if close_position is None or upper_wick_ratio is None or candle_return_pct is None:
+        return None
+
+    # 종가가 캔들 하단에 있으면 매수세 부족
+    if close_position < min_close_position:
+        return None
+
+    # 윗꼬리가 너무 길면 매도압력 강함
+    if upper_wick_ratio > max_upper_wick_ratio:
+        return None
+
+    # 강한 음봉 제외
+    if candle_return_pct < -abs(max_bear_candle_pct):
+        return None
+
+    # MA5 기울기 상승 확인
+    if require_ma5_slope and not ma5_slope_up:
+        return None
+
+    score += 20
+    reasons.append(
+        f"캔들품질 통과 / 종가위치 {close_position:.2f} / 윗꼬리 {upper_wick_ratio:.2f}"
+    )
+
+    if require_ma5_slope:
+        score += 10
+        reasons.append("MA5 상승기울기")
+
+    if close > ma5:
+        score += 15
+        reasons.append("MA5 회복")
+
+    if close > ma10:
+        score += 10
+        reasons.append("MA10 회복")
+
+    # --------------------------------------------------
+    # 6. MACD Histogram 개선
+    # --------------------------------------------------
+
+    hist = safe_float(row["macd_hist"])
+    hist1 = safe_float(prev["macd_hist"])
+    hist2 = safe_float(prev2["macd_hist"])
+    hist3 = safe_float(prev3["macd_hist"])
+
+    if None not in [hist, hist1, hist2, hist3]:
+        if hist > hist1 > hist2:
+            score += 25
+            reasons.append("MACD 히스토그램 3봉 개선")
+        elif hist > hist1:
+            score += 10
+            reasons.append("MACD 히스토그램 개선")
+
+    # --------------------------------------------------
+    # 7. 급락 / 과열 / MA20 이격 방지
+    # --------------------------------------------------
+
+    ret_3 = safe_float(row["ret_3"])
+
+    if ret_3 is None:
+        return None
+
+    three_bar_rise_pct = ret_3 * 100
+    ma20_gap_pct = ((close - ma20) / ma20) * 100 if ma20 else 0
+
+    if three_bar_rise_pct < min_3bar_rise:
+        return None
+
+    if three_bar_rise_pct > max_3bar_rise:
+        return None
+
+    if ma20_gap_pct < min_ma20_gap:
+        return None
+
+    if ma20_gap_pct > max_ma20_gap:
+        return None
+
+    if short_k >= 80 and middle_k is not None and middle_k >= 80:
+        return None
+
+    score += 10
+    reasons.append("과열 아님")
+
+    # --------------------------------------------------
+    # 최종 점수 필터
+    # --------------------------------------------------
+
+    if score < min_signal_score:
+        return None
 
     return {
-        "score": round(score, 1),
-        "oversold_count": oversold_count,
-        "total_count": total_count,
-        "timeframe_summary": timeframe_summary
+        "signal_time": df.index[idx],
+        "score": score,
+        "reason": " / ".join(reasons),
+        "close": close,
+        "short_k": short_k,
+        "short_d": short_d,
+        "middle_k": middle_k,
+        "volume_ratio": volume_ratio,
+        "ma20_gap_pct": ma20_gap_pct,
+        "three_bar_rise_pct": three_bar_rise_pct,
+        "close_position": close_position,
+        "upper_wick_ratio": upper_wick_ratio,
+        "candle_return_pct": candle_return_pct,
+        "ma5_slope_up": ma5_slope_up,
     }
 
 
-def is_recommendable_by_multi_stochrsi(analysis, mode="balanced"):
-    """
-    추천 최소 통과 조건
-
-    balanced:
-    - 일봉에서 단/중/장 중 최소 1개 과매도
-    - 4시간봉 또는 1시간봉에서 최소 1개 과매도
-
-    strict:
-    - 일봉 최소 1개
-    - 4시간봉 최소 1개
-    - 1시간봉 최소 1개
-
-    aggressive:
-    - 전체 9개 중 최소 2개 이상 과매도
-    """
-    day_any = any(
-        analysis["day"][key]["oversold"]
-        for key in STOCH_RSI_SETTINGS.keys()
-    )
-
-    h4_any = any(
-        analysis["minute240"][key]["oversold"]
-        for key in STOCH_RSI_SETTINGS.keys()
-    )
-
-    h1_any = any(
-        analysis["minute60"][key]["oversold"]
-        for key in STOCH_RSI_SETTINGS.keys()
-    )
-
-    total_oversold = 0
-    for tf_key in TIMEFRAME_SETTINGS.keys():
-        for setting_key in STOCH_RSI_SETTINGS.keys():
-            if analysis[tf_key][setting_key]["oversold"]:
-                total_oversold += 1
-
-    if mode == "strict":
-        return day_any and h4_any and h1_any
-
-    if mode == "aggressive":
-        return total_oversold >= 2
-
-    return day_any and (h4_any or h1_any)
-
-
 # ==================================================
-# 코인 분석
+# 백테스트
 # ==================================================
 
-def analyze_coin_multi_stochrsi(
+def backtest_ticker(
     ticker,
-    oversold_mode="both",
-    recommend_mode="balanced",
-    include_waiting=False
+    interval="minute240",
+    count=600,
+    oversold_lookback=12,
+    volume_ratio_threshold=1.3,
+    min_signal_score=200,
+    take_profit_pct=5.0,
+    stop_loss_pct=4.0,
+    max_hold_bars=12,
+    fee_pct=0.05,
+    slippage_pct=0.05,
+    max_3bar_rise=8.0,
+    max_ma20_gap=6.0,
+
+    # V2 강화 필터
+    min_required_volume_ratio=1.3,
+    max_short_k=70.0,
+    max_short_d=60.0,
+    max_middle_k=65.0,
+    min_ma20_gap=-6.0,
+    min_3bar_rise=-5.0,
+
+    # V3 BTC 필터
+    use_btc_filter=True,
+    btc_min_3bar_rise=-2.5,
+    btc_require_close_above_ma20=False,
+    btc_require_ma5_above_ma10=False,
+
+    # V3 캔들 품질 필터
+    min_close_position=0.55,
+    max_upper_wick_ratio=0.45,
+    max_bear_candle_pct=0.5,
+    require_ma5_slope=True,
 ):
-    """
-    코인 1개 분석
-    """
-    try:
-        day_df = get_ohlcv_cached(ticker, "day", 180)
-        h4_df = get_ohlcv_cached(ticker, "minute240", 180)
-        h1_df = get_ohlcv_cached(ticker, "minute60", 180)
+    df = get_ohlcv(ticker, interval=interval, count=count)
 
-        if day_df is None or h4_df is None or h1_df is None:
-            return None
+    if df is None or len(df) < 120:
+        return []
 
-        if len(day_df) < 80 or len(h4_df) < 80 or len(h1_df) < 80:
-            return None
+    df = prepare_indicators(df)
+    df = df.dropna().copy()
 
-        analysis = {
-            "day": analyze_timeframe_all_settings(
-                day_df,
-                oversold_mode=oversold_mode
-            ),
-            "minute240": analyze_timeframe_all_settings(
-                h4_df,
-                oversold_mode=oversold_mode
-            ),
-            "minute60": analyze_timeframe_all_settings(
-                h1_df,
-                oversold_mode=oversold_mode
-            )
-        }
+    if len(df) < 120:
+        return []
 
-        score_info = calculate_multi_stochrsi_score(analysis)
-        score = score_info["score"]
-        grade = get_grade_by_score(score)
+    btc_df = None
 
-        recommendable = is_recommendable_by_multi_stochrsi(
-            analysis,
-            mode=recommend_mode
+    if use_btc_filter:
+        btc_df = get_btc_indicator_df(interval=interval, count=count + 50)
+
+        if btc_df is None or btc_df.empty:
+            return []
+
+    results = []
+    last_exit_idx = -1
+
+    for i in range(80, len(df) - max_hold_bars - 2):
+        if i <= last_exit_idx:
+            continue
+
+        signal = judge_signal_at(
+            df,
+            idx=i,
+            oversold_lookback=oversold_lookback,
+            volume_ratio_threshold=volume_ratio_threshold,
+            max_3bar_rise=max_3bar_rise,
+            max_ma20_gap=max_ma20_gap,
+            min_signal_score=min_signal_score,
+
+            min_required_volume_ratio=min_required_volume_ratio,
+            max_short_k=max_short_k,
+            max_short_d=max_short_d,
+            max_middle_k=max_middle_k,
+            min_ma20_gap=min_ma20_gap,
+            min_3bar_rise=min_3bar_rise,
+
+            btc_df=btc_df,
+            use_btc_filter=use_btc_filter,
+            btc_min_3bar_rise=btc_min_3bar_rise,
+            btc_require_close_above_ma20=btc_require_close_above_ma20,
+            btc_require_ma5_above_ma10=btc_require_ma5_above_ma10,
+
+            min_close_position=min_close_position,
+            max_upper_wick_ratio=max_upper_wick_ratio,
+            max_bear_candle_pct=max_bear_candle_pct,
+            require_ma5_slope=require_ma5_slope,
         )
 
-        if not recommendable and not include_waiting:
-            return None
+        if signal is None:
+            continue
 
-        if grade is None and not include_waiting:
-            return None
+        entry_idx = i + 1
 
-        if grade is None and include_waiting:
-            grade = "대기"
+        if entry_idx >= len(df):
+            continue
 
-        day_count = score_info["timeframe_summary"]["day"]["oversold_count"]
-        h4_count = score_info["timeframe_summary"]["minute240"]["oversold_count"]
-        h1_count = score_info["timeframe_summary"]["minute60"]["oversold_count"]
+        entry_time = df.index[entry_idx]
+        raw_entry_price = float(df["open"].iloc[entry_idx])
+        entry_price = raw_entry_price * (1 + slippage_pct / 100)
 
-        reason = (
-            f"일봉 {day_count}/3, "
-            f"4H {h4_count}/3, "
-            f"1H {h1_count}/3"
-        )
+        tp_price = entry_price * (1 + take_profit_pct / 100)
+        sl_price = entry_price * (1 - stop_loss_pct / 100)
 
-        return {
-            "등급": grade,
+        exit_idx = None
+        exit_time = None
+        exit_price = None
+        exit_reason = None
+
+        max_gain = -999
+        max_drawdown = 999
+
+        final_exit_j = min(entry_idx + max_hold_bars, len(df) - 1)
+
+        for j in range(entry_idx, final_exit_j + 1):
+            high = float(df["high"].iloc[j])
+            low = float(df["low"].iloc[j])
+            close_j = float(df["close"].iloc[j])
+
+            gain = (high - entry_price) / entry_price * 100
+            drawdown = (low - entry_price) / entry_price * 100
+
+            max_gain = max(max_gain, gain)
+            max_drawdown = min(max_drawdown, drawdown)
+
+            hit_tp = high >= tp_price
+            hit_sl = low <= sl_price
+
+            # 같은 봉에서 익절/손절 모두 닿으면 보수적으로 손절 우선
+            if hit_tp and hit_sl:
+                exit_idx = j
+                exit_time = df.index[j]
+                exit_price = sl_price * (1 - slippage_pct / 100)
+                exit_reason = "SL_우선"
+                break
+
+            if hit_sl:
+                exit_idx = j
+                exit_time = df.index[j]
+                exit_price = sl_price * (1 - slippage_pct / 100)
+                exit_reason = "손절"
+                break
+
+            if hit_tp:
+                exit_idx = j
+                exit_time = df.index[j]
+                exit_price = tp_price * (1 - slippage_pct / 100)
+                exit_reason = "익절"
+                break
+
+            if j == final_exit_j:
+                exit_idx = j
+                exit_time = df.index[j]
+                exit_price = close_j * (1 - slippage_pct / 100)
+                exit_reason = "시간청산"
+                break
+
+        if exit_idx is None:
+            continue
+
+        gross_return = (exit_price - entry_price) / entry_price * 100
+        net_return = gross_return - (fee_pct * 2)
+
+        hold_bars = exit_idx - entry_idx + 1
+
+        results.append({
             "코인": ticker,
-            "점수": score,
-            "추천사유": reason,
-            "전체과매도개수": score_info["oversold_count"],
-            "전체조건개수": score_info["total_count"],
+            "신호시간": signal["signal_time"],
+            "진입시간": entry_time,
+            "청산시간": exit_time,
+            "보유봉수": hold_bars,
+            "신호점수": signal["score"],
+            "진입가": entry_price,
+            "청산가": exit_price,
+            "수익률": net_return,
+            "최대상승률": max_gain,
+            "최대하락률": max_drawdown,
+            "청산사유": exit_reason,
+            "단기K": signal["short_k"],
+            "단기D": signal["short_d"],
+            "중기K": signal["middle_k"],
+            "거래대금비율": signal["volume_ratio"],
+            "MA20이격률": signal["ma20_gap_pct"],
+            "3봉상승률": signal["three_bar_rise_pct"],
+            "종가위치": signal["close_position"],
+            "윗꼬리비율": signal["upper_wick_ratio"],
+            "캔들등락률": signal["candle_return_pct"],
+            "MA5상승": signal["ma5_slope_up"],
+            "신호사유": signal["reason"],
+        })
 
-            "일봉과매도개수": day_count,
-            "4H과매도개수": h4_count,
-            "1H과매도개수": h1_count,
+        last_exit_idx = exit_idx
 
-            "일봉단기": "YES" if analysis["day"]["short"]["oversold"] else "NO",
-            "일봉중기": "YES" if analysis["day"]["middle"]["oversold"] else "NO",
-            "일봉장기": "YES" if analysis["day"]["long"]["oversold"] else "NO",
+    return results
 
-            "4H단기": "YES" if analysis["minute240"]["short"]["oversold"] else "NO",
-            "4H중기": "YES" if analysis["minute240"]["middle"]["oversold"] else "NO",
-            "4H장기": "YES" if analysis["minute240"]["long"]["oversold"] else "NO",
 
-            "1H단기": "YES" if analysis["minute60"]["short"]["oversold"] else "NO",
-            "1H중기": "YES" if analysis["minute60"]["middle"]["oversold"] else "NO",
-            "1H장기": "YES" if analysis["minute60"]["long"]["oversold"] else "NO",
+def summarize_results(df):
+    if df is None or df.empty:
+        return {}
 
-            "일봉단기K": analysis["day"]["short"]["k"],
-            "일봉단기D": analysis["day"]["short"]["d"],
-            "일봉단기RSI": analysis["day"]["short"]["rsi"],
+    wins = df[df["수익률"] > 0]
+    losses = df[df["수익률"] <= 0]
 
-            "일봉중기K": analysis["day"]["middle"]["k"],
-            "일봉중기D": analysis["day"]["middle"]["d"],
-            "일봉중기RSI": analysis["day"]["middle"]["rsi"],
+    gross_profit = wins["수익률"].sum() if not wins.empty else 0
+    gross_loss = abs(losses["수익률"].sum()) if not losses.empty else 0
 
-            "일봉장기K": analysis["day"]["long"]["k"],
-            "일봉장기D": analysis["day"]["long"]["d"],
-            "일봉장기RSI": analysis["day"]["long"]["rsi"],
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.nan
 
-            "4H단기K": analysis["minute240"]["short"]["k"],
-            "4H단기D": analysis["minute240"]["short"]["d"],
-            "4H단기RSI": analysis["minute240"]["short"]["rsi"],
-
-            "4H중기K": analysis["minute240"]["middle"]["k"],
-            "4H중기D": analysis["minute240"]["middle"]["d"],
-            "4H중기RSI": analysis["minute240"]["middle"]["rsi"],
-
-            "4H장기K": analysis["minute240"]["long"]["k"],
-            "4H장기D": analysis["minute240"]["long"]["d"],
-            "4H장기RSI": analysis["minute240"]["long"]["rsi"],
-
-            "1H단기K": analysis["minute60"]["short"]["k"],
-            "1H단기D": analysis["minute60"]["short"]["d"],
-            "1H단기RSI": analysis["minute60"]["short"]["rsi"],
-
-            "1H중기K": analysis["minute60"]["middle"]["k"],
-            "1H중기D": analysis["minute60"]["middle"]["d"],
-            "1H중기RSI": analysis["minute60"]["middle"]["rsi"],
-
-            "1H장기K": analysis["minute60"]["long"]["k"],
-            "1H장기D": analysis["minute60"]["long"]["d"],
-            "1H장기RSI": analysis["minute60"]["long"]["rsi"],
-        }
-
-    except Exception as e:
-        print(f"{ticker} 분석 오류:", e)
-        return None
+    return {
+        "신호수": len(df),
+        "승률": (df["수익률"] > 0).mean() * 100,
+        "평균수익률": df["수익률"].mean(),
+        "중앙수익률": df["수익률"].median(),
+        "총합수익률": df["수익률"].sum(),
+        "평균최대상승률": df["최대상승률"].mean(),
+        "평균최대하락률": df["최대하락률"].mean(),
+        "익절비율": (df["청산사유"] == "익절").mean() * 100,
+        "손절비율": df["청산사유"].isin(["손절", "SL_우선"]).mean() * 100,
+        "시간청산비율": (df["청산사유"] == "시간청산").mean() * 100,
+        "평균보유봉수": df["보유봉수"].mean(),
+        "Profit Factor": profit_factor,
+    }
 
 
 # ==================================================
-# 화면 UI
+# UI 설명
 # ==================================================
 
-st.title("📊 Upbit Stoch RSI 다중조건 코인 추천기")
-
-st.caption(
-    "단기/중기/장기 Stochastic RSI를 일봉·4시간봉·1시간봉에서 분석하여 점수화합니다."
-)
-
-with st.expander("추천 로직 설명", expanded=False):
+with st.expander("백테스트 V3 방식 설명", expanded=False):
     st.markdown("""
-## 지표 기준
+### 검증 방식
 
-이 앱은 **Stochastic RSI** 기준입니다.
+- 기준 시간봉: 기본 4시간봉
+- 신호 발생: 해당 4시간봉 종가 기준
+- 진입 가격: 다음 4시간봉 시가
+- 청산 방식:
+  - 목표수익 도달
+  - 손절 도달
+  - 최대 보유봉수 도달 시 시간청산
+- 같은 봉에서 익절/손절 모두 닿으면 보수적으로 손절 우선 처리
+- 수수료와 슬리피지 반영
 
-### 단기
-- %K: 3
-- %D: 3
-- Stochastic 기간: 5
-- RSI 기간: 5
-- 과매수: 80
-- 과매도: 20
+### V3에서 추가된 핵심 필터
 
-### 중기
-- %K: 6
-- %D: 6
-- Stochastic 기간: 10
-- RSI 기간: 10
-- 과매수: 80
-- 과매도: 20
+V2는 상승전환 후보를 많이 잡는 장점이 있었지만,  
+시장 전체 하락 구간과 매도 거래량을 구분하는 능력이 부족했습니다.
 
-### 장기
-- %K: 12
-- %D: 12
-- Stochastic 기간: 20
-- RSI 기간: 20
-- 과매수: 80
-- 과매도: 20
+V3는 아래 필터를 추가했습니다.
 
-## 최고점 조건
+1. BTC 4시간봉 시장 필터
+2. 신호 캔들 종가 위치 필터
+3. 긴 윗꼬리 제외
+4. 강한 음봉 제외
+5. MA5 상승 기울기 확인
+6. 더 강한 거래대금 / K값 / MA20 이격 기본값
 
-아래 9개 조건이 모두 과매도이면 최고점입니다.
+### 이번 V3의 목적
 
-- 일봉 단기 / 중기 / 장기 과매도
-- 4시간봉 단기 / 중기 / 장기 과매도
-- 1시간봉 단기 / 중기 / 장기 과매도
-
-## 점수 가중치
-
-시간봉 가중치:
-
-- 일봉: 45
-- 4시간봉: 35
-- 1시간봉: 20
-
-세팅 가중치:
-
-- 단기: 1.0
-- 중기: 1.5
-- 장기: 2.0
-
-보너스:
-
-- 일봉 3개 모두 과매도: +50
-- 4시간봉 3개 모두 과매도: +35
-- 1시간봉 3개 모두 과매도: +20
-- 전체 9개 모두 과매도: +45
+V2가 후보 발굴기라면,  
+V3는 텔레그램 자동 알림 후보에 더 가깝게 만드는 검증 버전입니다.
 """)
 
 
@@ -822,79 +946,254 @@ with st.expander("추천 로직 설명", expanded=False):
 # 사이드바 설정
 # ==================================================
 
-st.sidebar.header("설정")
+st.sidebar.header("백테스트 V3 설정")
 
 scan_mode = st.sidebar.selectbox(
     "스캔 대상",
-    ["거래대금 상위", "전체 KRW", "수동 관심코인"],
+    ["거래대금 상위", "수동 관심코인"],
     index=0
 )
 
 top_count = st.sidebar.number_input(
     "거래대금 상위 N개",
-    min_value=10,
-    max_value=150,
-    value=60,
-    step=10
-)
-
-max_scan_count = st.sidebar.number_input(
-    "최대 스캔 개수",
-    min_value=0,
-    max_value=200,
-    value=60,
-    step=10,
-    help="0이면 제한 없음"
+    min_value=5,
+    max_value=100,
+    value=30,
+    step=5
 )
 
 manual_text = st.sidebar.text_area(
     "수동 관심코인",
-    value="KRW-ETH\nKRW-XRP\nKRW-SOL\nKRW-DOGE\nKRW-ADA\nKRW-AVAX\nKRW-LINK\nKRW-DOT\nKRW-SUI\nKRW-APT",
-    height=180,
-    help="수동 관심코인 모드에서 사용. 한 줄에 하나씩 입력"
+    value="KRW-ETH\nKRW-XRP\nKRW-SOL\nKRW-DOGE\nKRW-ADA\nKRW-AVAX\nKRW-LINK\nKRW-SUI\nKRW-APT",
+    height=160
+)
+
+interval = st.sidebar.selectbox(
+    "기준 봉",
+    ["minute240", "minute60"],
+    index=0,
+    help="우선 4시간봉 검증을 추천합니다."
+)
+
+count = st.sidebar.number_input(
+    "조회 캔들 수",
+    min_value=200,
+    max_value=1500,
+    value=700,
+    step=100
 )
 
 st.sidebar.divider()
 
-recommend_mode_text = st.sidebar.selectbox(
-    "추천 최소 조건",
-    ["균형형", "보수형", "공격형"],
-    index=0,
-    help="균형형: 일봉 최소 1개 + 4H/1H 중 최소 1개"
+oversold_lookback = st.sidebar.number_input(
+    "과매도 이력 확인 봉 수",
+    min_value=3,
+    max_value=50,
+    value=12,
+    step=1,
+    help="4시간봉 기준 12개는 약 2일입니다."
 )
 
-if recommend_mode_text == "보수형":
-    recommend_mode = "strict"
-elif recommend_mode_text == "공격형":
-    recommend_mode = "aggressive"
-else:
-    recommend_mode = "balanced"
-
-oversold_mode_text = st.sidebar.selectbox(
-    "과매도 판정",
-    ["K와 D 모두 20 이하", "K 또는 D 하나만 20 이하"],
-    index=0
+volume_ratio_threshold = st.sidebar.number_input(
+    "거래대금 증가 기준",
+    min_value=1.0,
+    max_value=5.0,
+    value=1.3,
+    step=0.1,
+    help="이 값 이상이면 강한 거래대금 증가 점수를 부여합니다."
 )
 
-oversold_mode = "both" if oversold_mode_text == "K와 D 모두 20 이하" else "either"
+min_signal_score = st.sidebar.number_input(
+    "최소 신호 점수",
+    min_value=50,
+    max_value=350,
+    value=200,
+    step=5,
+    help="V3 기본값은 200입니다."
+)
 
-btc_warning_gap = st.sidebar.number_input(
-    "BTC MA20 근접 주의 이격률 %",
+st.sidebar.divider()
+st.sidebar.subheader("V2/V3 강화 필터")
+
+exclude_stable = st.sidebar.checkbox(
+    "USDT/USDC 스테이블 코인 제외",
+    value=True
+)
+
+min_required_volume_ratio = st.sidebar.number_input(
+    "필수 최소 거래대금비율",
     min_value=0.0,
     max_value=5.0,
-    value=0.3,
-    step=0.1
+    value=1.3,
+    step=0.1,
+    help="1.3이면 최근 3봉 거래대금 평균이 20봉 평균보다 30% 이상인 경우만 통과"
 )
 
-ignore_btc_filter = st.sidebar.checkbox(
-    "테스트용: BTC MA20 필터 무시",
-    value=False
+max_short_k = st.sidebar.number_input(
+    "최대 단기 K",
+    min_value=20.0,
+    max_value=100.0,
+    value=70.0,
+    step=1.0,
+    help="단기 K가 너무 높으면 이미 반등이 진행된 상태로 판단"
 )
 
-include_waiting = st.sidebar.checkbox(
-    "대기 코인도 표시",
+max_short_d = st.sidebar.number_input(
+    "최대 단기 D",
+    min_value=20.0,
+    max_value=100.0,
+    value=60.0,
+    step=1.0
+)
+
+max_middle_k = st.sidebar.number_input(
+    "최대 중기 K",
+    min_value=20.0,
+    max_value=100.0,
+    value=65.0,
+    step=1.0
+)
+
+min_ma20_gap = st.sidebar.number_input(
+    "최소 MA20 이격률 %",
+    min_value=-50.0,
+    max_value=0.0,
+    value=-6.0,
+    step=1.0,
+    help="MA20 대비 너무 아래에 있으면 급락 중일 가능성이 있어 제외"
+)
+
+max_ma20_gap = st.sidebar.number_input(
+    "최대 MA20 이격률 %",
+    min_value=0.0,
+    max_value=50.0,
+    value=6.0,
+    step=1.0,
+    help="MA20 대비 너무 위에 있으면 추격 위험으로 제외"
+)
+
+min_3bar_rise = st.sidebar.number_input(
+    "최소 최근 3봉 상승률 %",
+    min_value=-30.0,
+    max_value=0.0,
+    value=-5.0,
+    step=1.0,
+    help="최근 3봉 기준 급락 중이면 제외"
+)
+
+max_3bar_rise = st.sidebar.number_input(
+    "과열 제외: 최근 3봉 상승률 %",
+    min_value=3.0,
+    max_value=50.0,
+    value=8.0,
+    step=1.0,
+    help="최근 3봉 기준 너무 급등한 경우 제외"
+)
+
+st.sidebar.divider()
+st.sidebar.subheader("V3 BTC / 캔들 품질 필터")
+
+use_btc_filter = st.sidebar.checkbox(
+    "BTC 4H 필터 사용",
+    value=True,
+    help="BTC가 급락 중이면 개별 코인 신호도 제외합니다."
+)
+
+btc_min_3bar_rise = st.sidebar.number_input(
+    "BTC 최소 최근 3봉 상승률 %",
+    min_value=-10.0,
+    max_value=5.0,
+    value=-2.5,
+    step=0.5,
+    help="BTC 최근 3봉 수익률이 이 값보다 낮으면 시장 약세로 판단"
+)
+
+btc_require_close_above_ma20 = st.sidebar.checkbox(
+    "BTC 종가 > MA20 필수",
     value=False,
-    help="추천 최소 조건을 만족하지 않아도 점수 확인용으로 표시"
+    help="체크하면 더 강한 시장 필터가 됩니다."
+)
+
+btc_require_ma5_above_ma10 = st.sidebar.checkbox(
+    "BTC MA5 > MA10 필수",
+    value=False,
+    help="체크하면 BTC 단기 추세까지 확인합니다."
+)
+
+min_close_position = st.sidebar.number_input(
+    "최소 종가 위치",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.55,
+    step=0.05,
+    help="0.55 이상이면 종가가 캔들 중상단에 위치"
+)
+
+max_upper_wick_ratio = st.sidebar.number_input(
+    "최대 윗꼬리 비율",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.45,
+    step=0.05,
+    help="윗꼬리가 너무 길면 위에서 매도압력이 있었다고 판단"
+)
+
+max_bear_candle_pct = st.sidebar.number_input(
+    "허용 음봉 폭 %",
+    min_value=0.0,
+    max_value=5.0,
+    value=0.5,
+    step=0.1,
+    help="예: 0.5면 -0.5%보다 큰 음봉은 제외"
+)
+
+require_ma5_slope = st.sidebar.checkbox(
+    "MA5 상승 기울기 필수",
+    value=True,
+    help="MA5가 전봉보다 상승 중인 경우만 통과"
+)
+
+st.sidebar.divider()
+
+take_profit_pct = st.sidebar.number_input(
+    "익절 %",
+    min_value=1.0,
+    max_value=30.0,
+    value=5.0,
+    step=0.5
+)
+
+stop_loss_pct = st.sidebar.number_input(
+    "손절 %",
+    min_value=1.0,
+    max_value=20.0,
+    value=4.0,
+    step=0.5
+)
+
+max_hold_bars = st.sidebar.number_input(
+    "최대 보유봉 수",
+    min_value=1,
+    max_value=50,
+    value=12,
+    step=1,
+    help="4시간봉 기준 12개는 약 2일입니다."
+)
+
+fee_pct = st.sidebar.number_input(
+    "편도 수수료 %",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.05,
+    step=0.01
+)
+
+slippage_pct = st.sidebar.number_input(
+    "편도 슬리피지 %",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.05,
+    step=0.01
 )
 
 request_delay = st.sidebar.number_input(
@@ -907,230 +1206,279 @@ request_delay = st.sidebar.number_input(
 
 
 # ==================================================
-# BTC 상태 표시
+# 실행
 # ==================================================
 
-btc = get_btc_ma20_status(warning_gap=btc_warning_gap)
+run = st.button("🧪 백테스트 V3 실행", type="primary", use_container_width=True)
 
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.metric("BTC 상태", btc["status"])
-
-with col2:
-    st.metric("BTC 현재가", format_price(btc["current_price"]))
-
-with col3:
-    st.metric("BTC 실시간 MA20", format_price(btc["live_ma20"]))
-
-with col4:
-    gap = btc["gap_rate"]
-    st.metric("MA20 이격률", "-" if gap is None else f"{gap:.2f}%")
-
-if btc["ok"]:
-    st.success("BTC MA20 필터 통과: 신규 추천 허용 상태입니다.")
-else:
-    st.warning(f"BTC MA20 필터 미통과: {btc['reason']}")
-
-
-# ==================================================
-# 스캔 대상 만들기
-# ==================================================
-
-def build_scan_list():
-    all_krw = get_krw_markets()
-    all_krw = [m for m in all_krw if m != "KRW-BTC"]
-
-    if scan_mode == "전체 KRW":
-        tickers = all_krw
-
-    elif scan_mode == "수동 관심코인":
+if run:
+    if scan_mode == "거래대금 상위":
+        tickers = get_top_trade_value_markets(limit=int(top_count))
+    else:
+        all_krw = get_krw_markets()
         manual = [
             x.strip().upper()
-            for x in manual_text.splitlines()
+            for x in manual_text.replace(",", "\n").splitlines()
             if x.strip()
         ]
-        tickers = [x for x in manual if x in all_krw and x != "KRW-BTC"]
+        tickers = [x for x in manual if x in all_krw]
 
-    else:
-        tickers = get_top_trade_value_markets(limit=top_count)
-        tickers = [x for x in tickers if x in all_krw and x != "KRW-BTC"]
+    tickers = [x for x in tickers if x != "KRW-BTC"]
+
+    if exclude_stable:
+        stable_excludes = ["KRW-USDT", "KRW-USDC"]
+        tickers = [x for x in tickers if x not in stable_excludes]
 
     tickers = list(dict.fromkeys(tickers))
 
-    if max_scan_count and max_scan_count > 0:
-        tickers = tickers[:max_scan_count]
-
-    return tickers
-
-
-# ==================================================
-# 추천 실행
-# ==================================================
-
-st.divider()
-
-run = st.button("🚀 추천받기", type="primary", use_container_width=True)
-
-if run:
-    if not btc["ok"] and not ignore_btc_filter:
-        st.error("BTC가 MA20 조건을 충족하지 않아 추천을 중단합니다.")
-        st.stop()
-
-    tickers = build_scan_list()
-
     if not tickers:
-        st.error("스캔할 코인이 없습니다. 설정을 확인해주세요.")
+        st.error("백테스트할 코인이 없습니다.")
         st.stop()
 
-    st.info(f"총 {len(tickers)}개 코인을 분석합니다.")
+    st.info(f"총 {len(tickers)}개 코인을 백테스트합니다.")
 
     progress = st.progress(0)
-    status_text = st.empty()
+    status = st.empty()
 
-    results = []
+    all_results = []
 
     for idx, ticker in enumerate(tickers):
-        status_text.write(f"분석 중: {ticker} ({idx + 1}/{len(tickers)})")
+        status.write(f"백테스트 중: {ticker} ({idx + 1}/{len(tickers)})")
 
-        item = analyze_coin_multi_stochrsi(
+        results = backtest_ticker(
             ticker=ticker,
-            oversold_mode=oversold_mode,
-            recommend_mode=recommend_mode,
-            include_waiting=include_waiting
+            interval=interval,
+            count=int(count),
+            oversold_lookback=int(oversold_lookback),
+            volume_ratio_threshold=float(volume_ratio_threshold),
+            min_signal_score=int(min_signal_score),
+            take_profit_pct=float(take_profit_pct),
+            stop_loss_pct=float(stop_loss_pct),
+            max_hold_bars=int(max_hold_bars),
+            fee_pct=float(fee_pct),
+            slippage_pct=float(slippage_pct),
+            max_3bar_rise=float(max_3bar_rise),
+            max_ma20_gap=float(max_ma20_gap),
+
+            min_required_volume_ratio=float(min_required_volume_ratio),
+            max_short_k=float(max_short_k),
+            max_short_d=float(max_short_d),
+            max_middle_k=float(max_middle_k),
+            min_ma20_gap=float(min_ma20_gap),
+            min_3bar_rise=float(min_3bar_rise),
+
+            use_btc_filter=bool(use_btc_filter),
+            btc_min_3bar_rise=float(btc_min_3bar_rise),
+            btc_require_close_above_ma20=bool(btc_require_close_above_ma20),
+            btc_require_ma5_above_ma10=bool(btc_require_ma5_above_ma10),
+
+            min_close_position=float(min_close_position),
+            max_upper_wick_ratio=float(max_upper_wick_ratio),
+            max_bear_candle_pct=float(max_bear_candle_pct),
+            require_ma5_slope=bool(require_ma5_slope),
         )
 
-        if item is not None:
-            results.append(item)
+        all_results.extend(results)
 
         progress.progress((idx + 1) / len(tickers))
-        time.sleep(request_delay)
+        time.sleep(float(request_delay))
 
-    status_text.write("분석 완료")
+    status.write("백테스트 완료")
 
-    if not results:
-        st.warning("현재 조건에 맞는 추천 코인이 없습니다.")
+    if not all_results:
+        st.warning("조건에 맞는 과거 신호가 없습니다.")
         st.info("""
-조건이 너무 강하면 아래 순서로 완화해보세요.
+조건이 너무 강할 수 있습니다.
 
-1. 과매도 판정을 'K 또는 D 하나만 20 이하'로 변경  
-2. 추천 최소 조건을 '공격형'으로 변경  
-3. 대기 코인도 표시 체크  
-4. 스캔 대상을 거래대금 상위 60개에서 전체 KRW로 변경  
+완화 순서:
+1. 최소 신호 점수 200 → 180
+2. 필수 최소 거래대금비율 1.3 → 1.1
+3. 최대 단기K 70 → 75
+4. 최대 단기D 60 → 65
+5. 최대 중기K 65 → 70
+6. 최소 종가 위치 0.55 → 0.50
+7. 최대 윗꼬리 비율 0.45 → 0.55
+8. MA5 상승 기울기 필수 해제
+9. BTC 종가 > MA20 필수 체크 해제
+10. 조회 캔들 수 700 → 1000
 """)
         st.stop()
 
-    result_tickers = [x["코인"] for x in results]
-    prices = get_current_prices_batch(result_tickers)
+    result_df = pd.DataFrame(all_results)
+    result_df = result_df.sort_values("신호시간", ascending=False)
 
-    for item in results:
-        price = prices.get(item["코인"])
-        item["현재가"] = price
-        item["현재가표시"] = format_price(price)
+    summary = summarize_results(result_df)
 
-    df = pd.DataFrame(results)
+    st.subheader("백테스트 V3 요약")
 
-    numeric_cols = [
-        "일봉단기K", "일봉단기D", "일봉단기RSI",
-        "일봉중기K", "일봉중기D", "일봉중기RSI",
-        "일봉장기K", "일봉장기D", "일봉장기RSI",
+    c1, c2, c3, c4 = st.columns(4)
 
-        "4H단기K", "4H단기D", "4H단기RSI",
-        "4H중기K", "4H중기D", "4H중기RSI",
-        "4H장기K", "4H장기D", "4H장기RSI",
+    with c1:
+        st.metric("신호수", summary.get("신호수", 0))
+        st.metric("승률", format_pct(summary.get("승률")))
 
-        "1H단기K", "1H단기D", "1H단기RSI",
-        "1H중기K", "1H중기D", "1H중기RSI",
-        "1H장기K", "1H장기D", "1H장기RSI",
+    with c2:
+        st.metric("평균수익률", format_pct(summary.get("평균수익률")))
+        st.metric("중앙수익률", format_pct(summary.get("중앙수익률")))
+
+    with c3:
+        st.metric("평균최대상승률", format_pct(summary.get("평균최대상승률")))
+        st.metric("평균최대하락률", format_pct(summary.get("평균최대하락률")))
+
+    with c4:
+        st.metric("익절비율", format_pct(summary.get("익절비율")))
+        st.metric("손절비율", format_pct(summary.get("손절비율")))
+
+    c5, c6, c7, c8 = st.columns(4)
+
+    with c5:
+        st.metric("시간청산비율", format_pct(summary.get("시간청산비율")))
+
+    with c6:
+        st.metric("총합수익률", format_pct(summary.get("총합수익률")))
+
+    with c7:
+        st.metric("평균보유봉수", format_num(summary.get("평균보유봉수")))
+
+    with c8:
+        pf = summary.get("Profit Factor")
+        st.metric("Profit Factor", "-" if pd.isna(pf) else f"{pf:.2f}")
+
+    st.subheader("결과 해석")
+
+    avg_ret = summary.get("평균수익률", 0)
+    win_rate = summary.get("승률", 0)
+    pf = summary.get("Profit Factor", np.nan)
+    signal_count = summary.get("신호수", 0)
+
+    if avg_ret > 0 and win_rate >= 50 and (not pd.isna(pf) and pf >= 1.2):
+        st.success("현재 V3 설정은 긍정적인 결과입니다. 텔레그램 알림 조건 후보로 검토할 수 있습니다.")
+    elif avg_ret > 0:
+        st.info("평균수익률은 양호하지만 승률 또는 손익비가 애매합니다. 추가 조정이 필요합니다.")
+    else:
+        st.warning("현재 설정은 수익성이 부족합니다. 필터 또는 익절/손절 조건을 조정하세요.")
+
+    if signal_count < 10:
+        st.warning("신호수가 너무 적습니다. 조건이 과도하게 강할 수 있습니다.")
+    elif signal_count > 200:
+        st.warning("신호수가 많습니다. 텔레그램 알림용으로는 조건을 더 강화하는 것이 좋습니다.")
+
+    st.write("""
+### 체크할 핵심 기준
+
+- 평균수익률이 양수인가?
+- 승률이 50% 이상인가?
+- Profit Factor가 1.2 이상인가?
+- 평균최대하락률이 손절폭보다 과도하지 않은가?
+- 신호수가 너무 적거나 너무 많지 않은가?
+- 손절비율이 과도하게 높지 않은가?
+- 종가위치가 충분히 높은 신호가 주로 살아남는가?
+- 윗꼬리비율이 높은 신호가 잘 제거되었는가?
+""")
+
+    st.subheader("백테스트 V3 상세 결과")
+
+    display_df = result_df.copy()
+
+    round_cols = [
+        "수익률",
+        "최대상승률",
+        "최대하락률",
+        "단기K",
+        "단기D",
+        "중기K",
+        "거래대금비율",
+        "MA20이격률",
+        "3봉상승률",
+        "종가위치",
+        "윗꼬리비율",
+        "캔들등락률",
     ]
 
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").round(2)
-
-    df["등급순서"] = df["등급"].apply(grade_rank)
-
-    df = df.sort_values(
-        by=["등급순서", "점수", "전체과매도개수", "일봉과매도개수", "4H과매도개수", "1H과매도개수"],
-        ascending=[True, False, False, False, False, False]
-    ).drop(columns=["등급순서"])
-
-    st.subheader("추천 결과")
+    for col in round_cols:
+        if col in display_df.columns:
+            display_df[col] = pd.to_numeric(display_df[col], errors="coerce").round(2)
 
     view_cols = [
-        "등급",
         "코인",
-        "점수",
-        "현재가표시",
-        "추천사유",
-        "전체과매도개수",
-        "전체조건개수",
-
-        "일봉과매도개수",
-        "4H과매도개수",
-        "1H과매도개수",
-
-        "일봉단기",
-        "일봉중기",
-        "일봉장기",
-
-        "4H단기",
-        "4H중기",
-        "4H장기",
-
-        "1H단기",
-        "1H중기",
-        "1H장기",
+        "신호시간",
+        "진입시간",
+        "청산시간",
+        "보유봉수",
+        "신호점수",
+        "수익률",
+        "최대상승률",
+        "최대하락률",
+        "청산사유",
+        "단기K",
+        "단기D",
+        "중기K",
+        "거래대금비율",
+        "MA20이격률",
+        "3봉상승률",
+        "종가위치",
+        "윗꼬리비율",
+        "캔들등락률",
+        "MA5상승",
+        "신호사유",
     ]
 
+    available_cols = [c for c in view_cols if c in display_df.columns]
+
     st.dataframe(
-        df[view_cols],
+        display_df[available_cols],
         use_container_width=True,
         hide_index=True
     )
 
-    csv = df.to_csv(index=False).encode("utf-8-sig")
+    csv = result_df.to_csv(index=False).encode("utf-8-sig")
 
     st.download_button(
         "CSV 다운로드",
         data=csv,
-        file_name=f"multi_stochrsi_recommend_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        file_name=f"backtest_v3_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv"
     )
 
-    st.subheader("코인별 상세 분석")
+else:
+    st.info("왼쪽 설정을 확인한 뒤 백테스트 V3를 실행하세요.")
 
-    for _, row in df.iterrows():
-        title = f"{row['등급']}등급 | {row['코인']} | {row['점수']}점 | {row['추천사유']}"
+    st.markdown("""
+## V3 추천 초기 설정
 
-        with st.expander(title):
-            st.markdown("### 과매도 요약")
-            st.write(f"전체 과매도: {row['전체과매도개수']} / {row['전체조건개수']}")
-            st.write(f"일봉: {row['일봉과매도개수']} / 3")
-            st.write(f"4시간봉: {row['4H과매도개수']} / 3")
-            st.write(f"1시간봉: {row['1H과매도개수']} / 3")
+처음에는 아래 설정으로 검증해보세요.
 
-            c1, c2, c3 = st.columns(3)
+```text
+스캔 대상: 거래대금 상위 30개
+기준 봉: minute240
+조회 캔들 수: 700
 
-            with c1:
-                st.markdown("### 일봉")
-                st.write(f"단기: {row['일봉단기']} / K {row['일봉단기K']} / D {row['일봉단기D']} / RSI {row['일봉단기RSI']}")
-                st.write(f"중기: {row['일봉중기']} / K {row['일봉중기K']} / D {row['일봉중기D']} / RSI {row['일봉중기RSI']}")
-                st.write(f"장기: {row['일봉장기']} / K {row['일봉장기K']} / D {row['일봉장기D']} / RSI {row['일봉장기RSI']}")
+과매도 이력 확인 봉 수: 12
+거래대금 증가 기준: 1.3
+최소 신호 점수: 200
 
-            with c2:
-                st.markdown("### 4시간봉")
-                st.write(f"단기: {row['4H단기']} / K {row['4H단기K']} / D {row['4H단기D']} / RSI {row['4H단기RSI']}")
-                st.write(f"중기: {row['4H중기']} / K {row['4H중기K']} / D {row['4H중기D']} / RSI {row['4H중기RSI']}")
-                st.write(f"장기: {row['4H장기']} / K {row['4H장기K']} / D {row['4H장기D']} / RSI {row['4H장기RSI']}")
+USDT/USDC 제외: 체크
+필수 최소 거래대금비율: 1.3
+최대 단기K: 70
+최대 단기D: 60
+최대 중기K: 65
+최소 MA20 이격률: -6%
+최대 MA20 이격률: 6%
+최소 최근 3봉 상승률: -5%
+과열 제외 최근 3봉 상승률: 8%
 
-            with c3:
-                st.markdown("### 1시간봉")
-                st.write(f"단기: {row['1H단기']} / K {row['1H단기K']} / D {row['1H단기D']} / RSI {row['1H단기RSI']}")
-                st.write(f"중기: {row['1H중기']} / K {row['1H중기K']} / D {row['1H중기D']} / RSI {row['1H중기RSI']}")
-                st.write(f"장기: {row['1H장기']} / K {row['1H장기K']} / D {row['1H장기D']} / RSI {row['1H장기RSI']}")
+BTC 4H 필터 사용: 체크
+BTC 최소 최근 3봉 상승률: -2.5%
+BTC 종가 > MA20 필수: 미체크
+BTC MA5 > MA10 필수: 미체크
 
+최소 종가 위치: 0.55
+최대 윗꼬리 비율: 0.45
+허용 음봉 폭: 0.5%
+MA5 상승 기울기 필수: 체크
 
-st.divider()
-
-st.caption("주의: 본 프로그램은 투자 참고용 보조 도구이며, 매수/매도 판단의 책임은 사용자 본인에게 있습니다.")
+익절: 5%
+손절: 4%
+최대 보유봉 수: 12
+수수료: 0.05%
+슬리피지: 0.05%
