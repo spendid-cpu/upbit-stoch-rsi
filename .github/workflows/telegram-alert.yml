@@ -34,9 +34,14 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
           ALERT_INTERVAL: "minute240"
           ALERT_CANDLE_COUNT: "700"
           REQUEST_DELAY: "0.12"
           MAX_ALERT_COUNT: "10"
+
+          # 테스트 기간에는 true 유지 권장
+          # 나중에 빈 알림이 귀찮으면 false로 변경
           SEND_EMPTY_ALERT: "true"
+
         run: python alert_bot.py
