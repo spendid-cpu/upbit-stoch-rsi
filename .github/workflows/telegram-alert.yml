@@ -1,16 +1,20 @@
 name: Telegram Coin Alert
 
+permissions:
+  contents: write
+
+concurrency:
+  group: telegram-signal-state
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
 
   schedule:
-    # 예비 알림: 00:05, 08:05, 12:05, 16:05, 20:05 KST
-    # GitHub Actions cron은 UTC 기준
-    - cron: "5 15,23,3,7,11 * * *"
-
-    # 확정 알림: 09:10, 13:10, 17:10, 21:10 KST
-    # GitHub Actions cron은 UTC 기준
-    - cron: "10 0,4,8,12 * * *"
+    # 확정 알림만 운영
+    # KST: 01:10, 09:10, 13:10, 17:10, 21:10
+    # UTC: 16:10, 00:10, 04:10, 08:10, 12:10
+    - cron: "10 0,4,8,12,16 * * *"
 
 jobs:
   alert:
@@ -19,6 +23,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -36,12 +42,31 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
           ALERT_INTERVAL: "minute240"
-          ALERT_CANDLE_COUNT: "700"
-          REQUEST_DELAY: "0.12"
+          ALERT_CANDLE_COUNT: "500"
+          REQUEST_DELAY: "0.08"
           MAX_ALERT_COUNT: "10"
-
-          # 테스트 기간에는 true 유지 권장
-          # 나중에 빈 알림이 귀찮으면 false로 변경
           SEND_EMPTY_ALERT: "true"
 
+          ENABLE_SIGNAL_TRACKING: "true"
+          SIGNAL_STATE_FILE: "active_signals.json"
+          TAKE_PROFIT_RATE: "0.05"
+          STOP_LOSS_RATE: "0.04"
+          MAX_HOLD_HOURS: "48"
+          SIGNAL_COOLDOWN_HOURS: "12"
+
         run: python alert_bot.py
+
+      - name: Commit signal state
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git pull --rebase
+
+          if [ -f active_signals.json ]; then
+            git add active_signals.json
+            git diff --cached --quiet || git commit -m "update active signals"
+            git push
+          else
+            echo "active_signals.json not found. Nothing to commit."
+          fi
