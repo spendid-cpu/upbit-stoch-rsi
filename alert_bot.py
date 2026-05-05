@@ -1,778 +1,1078 @@
+# alert_bot.py
+# Telegram Coin Alert Bot V3.3
+# - Upbit KRW 4H scanner
+# - Preliminary / Confirmed alert auto-detection
+# - BTC 4H filter
+# - Candle quality filter
+# - MA5 slope filter
+# - Telegram A/B/WATCH grading system
+
 import os
 import time
+import math
+import traceback
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import requests
-from datetime import datetime, timedelta, timezone
-
-import numpy as np
 import pandas as pd
-import pyupbit
+import numpy as np
+
+try:
+    import pyupbit
+except Exception:
+    pyupbit = None
 
 
-# ==================================================
-# 기본 설정
-# ==================================================
+# =========================
+# 1. ENV CONFIG
+# =========================
 
-KST = timezone(timedelta(hours=9))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-STOCH_RSI_SETTINGS = {
-    "short": {
-        "rsi_period": 5,
-        "stoch_period": 5,
-        "k_smooth": 3,
-        "d_smooth": 3,
-    },
-    "middle": {
-        "rsi_period": 10,
-        "stoch_period": 10,
-        "k_smooth": 6,
-        "d_smooth": 6,
-    },
-    "long": {
-        "rsi_period": 20,
-        "stoch_period": 20,
-        "k_smooth": 12,
-        "d_smooth": 12,
-    },
-}
+ALERT_INTERVAL = os.getenv("ALERT_INTERVAL", "minute240").strip()
+ALERT_CANDLE_COUNT = int(os.getenv("ALERT_CANDLE_COUNT", "700"))
+REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0.12"))
+MAX_ALERT_COUNT = int(os.getenv("MAX_ALERT_COUNT", "10"))
+SEND_EMPTY_ALERT = os.getenv("SEND_EMPTY_ALERT", "true").strip().lower() == "true"
+
+KST = ZoneInfo("Asia/Seoul")
+
+UPBIT_MARKET_URL = "https://api.upbit.com/v1/market/all"
+UPBIT_TICKER_URL = "https://api.upbit.com/v1/ticker"
 
 
-STABLE_EXCLUDES = {
-    "KRW-USDT",
-    "KRW-USDC",
-    "KRW-USDE",
-}
+# =========================
+# 2. BASIC UTILS
+# =========================
 
-
-# ==================================================
-# 유틸
-# ==================================================
-
-def safe_float(x):
-    try:
-        if x is None or pd.isna(x):
-            return None
-        return float(x)
-    except Exception:
-        return None
-
-
-def fmt(x, digits=2):
-    try:
-        if x is None or pd.isna(x):
-            return "-"
-        return f"{float(x):.{digits}f}"
-    except Exception:
-        return "-"
-
-
-def get_kst_now():
+def now_kst():
     return datetime.now(KST)
 
 
-def detect_alert_mode():
-    """
-    GitHub Actions 실행 시간을 기준으로 알림 모드 자동 판별.
-    - 08,12,16,20시 KST: PRE
-    - 09,13,17,21시 KST: POST
-    환경변수 ALERT_MODE가 있으면 그 값을 우선 사용.
-    """
-    env_mode = os.getenv("ALERT_MODE", "").strip().upper()
-    if env_mode in ["PRE", "POST"]:
-        return env_mode
-
-    now = get_kst_now()
-    if now.hour in [8, 12, 16, 20]:
-        return "PRE"
-    if now.hour in [9, 13, 17, 21]:
-        return "POST"
-
-    return "PRE"
+def format_now():
+    return now_kst().strftime("%Y-%m-%d %H:%M:%S KST")
 
 
-# ==================================================
-# 텔레그램
-# ==================================================
-
-def send_telegram_message(text):
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    if not token or not chat_id:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID가 없습니다.")
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-
-    res = requests.post(url, data=payload, timeout=20)
-
-    if res.status_code != 200:
-        raise RuntimeError(f"Telegram 전송 실패: {res.status_code} / {res.text}")
-
-    return True
+def safe_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, float) and math.isnan(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
 
 
-# ==================================================
-# Upbit 데이터
-# ==================================================
+def get_value(candidate, keys, default=0.0):
+    for key in keys:
+        if key in candidate:
+            return candidate[key]
+    return default
+
+
+def percent(a, b):
+    try:
+        if b == 0:
+            return 0.0
+        return (a / b - 1.0) * 100.0
+    except Exception:
+        return 0.0
+
+
+def is_number(x):
+    try:
+        if x is None:
+            return False
+        v = float(x)
+        return not math.isnan(v)
+    except Exception:
+        return False
+
+
+# =========================
+# 3. TELEGRAM
+# =========================
+
+def send_telegram_message(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise ValueError("TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID가 비어 있습니다.")
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    # Telegram message limit is 4096 chars.
+    chunks = []
+    max_len = 3900
+
+    if len(message) <= max_len:
+        chunks = [message]
+    else:
+        lines = message.split("\n")
+        current = ""
+        for line in lines:
+            if len(current) + len(line) + 1 > max_len:
+                chunks.append(current)
+                current = line
+            else:
+                current += ("\n" if current else "") + line
+        if current:
+            chunks.append(current)
+
+    for chunk in chunks:
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": chunk,
+            "disable_web_page_preview": True
+        }
+
+        res = requests.post(url, data=payload, timeout=15)
+        if res.status_code != 200:
+            raise RuntimeError(f"Telegram 전송 실패: {res.status_code} / {res.text}")
+
+        time.sleep(0.3)
+
+
+# =========================
+# 4. UPBIT DATA
+# =========================
 
 def get_krw_markets():
+    """
+    KRW 마켓 전체 조회.
+    pyupbit 우선 사용, 실패 시 requests 사용.
+    """
     try:
-        url = "https://api.upbit.com/v1/market/all"
-        params = {"isDetails": "true"}
-        res = requests.get(url, params=params, timeout=10)
+        if pyupbit is not None:
+            markets = pyupbit.get_tickers(fiat="KRW")
+            if markets:
+                return sorted(markets)
+    except Exception:
+        pass
+
+    try:
+        res = requests.get(UPBIT_MARKET_URL, params={"isDetails": "false"}, timeout=15)
+        res.raise_for_status()
         data = res.json()
-
-        markets = []
-
-        for item in data:
-            market = item.get("market", "")
-            warning = item.get("market_warning", "NONE")
-
-            if market.startswith("KRW-") and warning == "NONE":
-                markets.append(market)
-
-        return markets
-
-    except Exception:
-        try:
-            return pyupbit.get_tickers(fiat="KRW")
-        except Exception:
-            return []
+        markets = [x["market"] for x in data if x.get("market", "").startswith("KRW-")]
+        return sorted(markets)
+    except Exception as e:
+        raise RuntimeError(f"KRW 마켓 조회 실패: {e}")
 
 
-def get_ohlcv(ticker, interval="minute240", count=700):
-    try:
-        df = pyupbit.get_ohlcv(
-            ticker=ticker,
-            interval=interval,
-            count=count
-        )
-
-        if df is None or df.empty:
-            return None
-
-        df = df.copy()
-        df = df.sort_index()
-
-        if "value" not in df.columns:
-            if "close" in df.columns and "volume" in df.columns:
-                df["value"] = df["close"] * df["volume"]
-            else:
-                df["value"] = 0
-
-        return df
-
-    except Exception:
+def get_ohlcv(market, interval="minute240", count=700, retry=2):
+    """
+    pyupbit OHLCV 사용.
+    pyupbit는 count가 커도 내부적으로 처리 가능.
+    """
+    if pyupbit is None:
         return None
 
+    for attempt in range(retry + 1):
+        try:
+            df = pyupbit.get_ohlcv(market, interval=interval, count=count)
+            if df is None or len(df) < 50:
+                time.sleep(0.3)
+                continue
 
-# ==================================================
-# 지표 계산
-# ==================================================
+            df = df.copy()
 
-def calculate_rsi(close, period=14):
+            # pyupbit columns:
+            # open, high, low, close, volume, value
+            required = ["open", "high", "low", "close", "volume"]
+            for col in required:
+                if col not in df.columns:
+                    return None
+
+            if "value" not in df.columns:
+                df["value"] = df["close"] * df["volume"]
+
+            df = df.dropna()
+            return df
+
+        except Exception:
+            if attempt >= retry:
+                return None
+            time.sleep(0.5)
+
+    return None
+
+
+def get_ticker_prices(markets):
+    try:
+        joined = ",".join(markets)
+        res = requests.get(UPBIT_TICKER_URL, params={"markets": joined}, timeout=15)
+        res.raise_for_status()
+        return res.json()
+    except Exception:
+        return []
+
+
+# =========================
+# 5. INDICATORS
+# =========================
+
+def calc_rsi(close, period=14):
     close = close.astype(float)
-
     delta = close.diff()
+
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50)
 
     return rsi
 
 
-def calculate_stoch_rsi(df, setting, prefix):
-    result = df.copy()
+def calc_stoch_rsi(close, rsi_period=14, stoch_period=14, k_smooth=3, d_smooth=3):
+    rsi = calc_rsi(close, rsi_period)
 
-    rsi = calculate_rsi(result["close"], period=setting["rsi_period"])
+    min_rsi = rsi.rolling(stoch_period, min_periods=stoch_period).min()
+    max_rsi = rsi.rolling(stoch_period, min_periods=stoch_period).max()
 
-    rsi_min = rsi.rolling(setting["stoch_period"]).min()
-    rsi_max = rsi.rolling(setting["stoch_period"]).max()
+    stoch = (rsi - min_rsi) / (max_rsi - min_rsi)
+    stoch = stoch.replace([np.inf, -np.inf], np.nan).fillna(0.5) * 100
 
-    denominator = (rsi_max - rsi_min).replace(0, np.nan)
-    raw = 100 * ((rsi - rsi_min) / denominator)
+    k = stoch.rolling(k_smooth, min_periods=1).mean()
+    d = k.rolling(d_smooth, min_periods=1).mean()
 
-    k = raw.rolling(setting["k_smooth"]).mean()
-    d = k.rolling(setting["d_smooth"]).mean()
-
-    result[f"{prefix}_rsi"] = rsi
-    result[f"{prefix}_raw"] = raw
-    result[f"{prefix}_k"] = k
-    result[f"{prefix}_d"] = d
-
-    return result
-
-
-def calculate_macd(df, fast=12, slow=26, signal=9):
-    result = df.copy()
-
-    ema_fast = result["close"].ewm(span=fast, adjust=False).mean()
-    ema_slow = result["close"].ewm(span=slow, adjust=False).mean()
-
-    macd = ema_fast - ema_slow
-    macd_signal = macd.ewm(span=signal, adjust=False).mean()
-    hist = macd - macd_signal
-
-    result["macd"] = macd
-    result["macd_signal"] = macd_signal
-    result["macd_hist"] = hist
-
-    return result
+    return k, d
 
 
 def prepare_indicators(df):
-    result = df.copy()
+    df = df.copy()
 
-    for key, setting in STOCH_RSI_SETTINGS.items():
-        result = calculate_stoch_rsi(result, setting, key)
+    df["ma5"] = df["close"].rolling(5, min_periods=5).mean()
+    df["ma20"] = df["close"].rolling(20, min_periods=20).mean()
 
-    result = calculate_macd(result)
+    short_k, short_d = calc_stoch_rsi(
+        df["close"],
+        rsi_period=14,
+        stoch_period=14,
+        k_smooth=3,
+        d_smooth=3
+    )
 
-    result["ma5"] = result["close"].rolling(5).mean()
-    result["ma10"] = result["close"].rolling(10).mean()
-    result["ma20"] = result["close"].rolling(20).mean()
+    mid_k, mid_d = calc_stoch_rsi(
+        df["close"],
+        rsi_period=14,
+        stoch_period=28,
+        k_smooth=3,
+        d_smooth=3
+    )
 
-    result["ret_3"] = result["close"].pct_change(3)
+    df["short_k"] = short_k
+    df["short_d"] = short_d
+    df["mid_k"] = mid_k
+    df["mid_d"] = mid_d
 
-    result["value_avg3"] = result["value"].rolling(3).mean()
-    result["value_avg20"] = result["value"].rolling(20).mean()
-    result["volume_ratio"] = result["value_avg3"] / result["value_avg20"]
+    df["value_ma20_prev"] = df["value"].shift(1).rolling(20, min_periods=5).mean()
 
-    candle_range = (result["high"] - result["low"]).replace(0, np.nan)
-
-    result["close_position"] = (result["close"] - result["low"]) / candle_range
-
-    result["upper_wick_ratio"] = (
-        result["high"] - result[["open", "close"]].max(axis=1)
-    ) / candle_range
-
-    result["candle_return_pct"] = (
-        (result["close"] - result["open"]) / result["open"]
-    ) * 100
-
-    result["ma5_slope_up"] = result["ma5"] > result["ma5"].shift(1)
-
-    return result
+    return df
 
 
-# ==================================================
-# BTC 필터
-# ==================================================
+# =========================
+# 6. ALERT MODE
+# =========================
 
-def get_btc_indicator_df(interval="minute240", count=750):
-    df = get_ohlcv("KRW-BTC", interval=interval, count=count)
+def detect_alert_mode():
+    """
+    GitHub Actions 스케줄 기준:
+    - 예비 알림: 00:05, 08:05, 12:05, 16:05, 20:05 KST
+    - 확정 알림: 09:10, 13:10, 17:10, 21:10 KST
 
-    if df is None or df.empty:
+    확정 시간대 근처면 confirmed.
+    나머지는 preliminary.
+    """
+    now = now_kst()
+    h = now.hour
+    m = now.minute
+
+    if h in [9, 13, 17, 21] and 0 <= m <= 45:
+        return "confirmed"
+
+    return "preliminary"
+
+
+def get_signal_index(df, alert_mode):
+    """
+    pyupbit minute240은 현재 진행 중인 4H 캔들이 포함된다.
+
+    confirmed:
+      막 마감된 이전 4H 캔들을 평가해야 하므로 -2 사용.
+
+    preliminary:
+      현재 진행 중인 4H 캔들을 평가하므로 -1 사용.
+    """
+    if len(df) < 60:
         return None
 
-    result = df.copy().sort_index()
+    if alert_mode == "confirmed":
+        return len(df) - 2
 
-    result["ma5"] = result["close"].rolling(5).mean()
-    result["ma10"] = result["close"].rolling(10).mean()
-    result["ma20"] = result["close"].rolling(20).mean()
-    result["ret_3"] = result["close"].pct_change(3)
-
-    return result.dropna().copy()
+    return len(df) - 1
 
 
-def check_btc_filter_at(
-    btc_df,
-    signal_time,
-    btc_min_3bar_rise=-2.0,
-    btc_require_close_above_ma20=True,
-    btc_require_ma5_above_ma10=False,
-):
-    if btc_df is None or btc_df.empty:
-        return False, "BTC 데이터 없음"
+# =========================
+# 7. BTC FILTER
+# =========================
 
-    try:
-        pos = btc_df.index.get_indexer([signal_time], method="ffill")[0]
-
-        if pos < 0:
-            return False, "BTC 매칭 실패"
-
-        row = btc_df.iloc[pos]
-
-        btc_close = safe_float(row["close"])
-        btc_ma5 = safe_float(row["ma5"])
-        btc_ma10 = safe_float(row["ma10"])
-        btc_ma20 = safe_float(row["ma20"])
-        btc_ret_3 = safe_float(row["ret_3"])
-
-        if None in [btc_close, btc_ma5, btc_ma10, btc_ma20, btc_ret_3]:
-            return False, "BTC 지표 부족"
-
-        btc_ret_3_pct = btc_ret_3 * 100
-
-        close_above_ma20 = btc_close > btc_ma20
-        ma5_above_ma10 = btc_ma5 > btc_ma10
-        not_crashing = btc_ret_3_pct > btc_min_3bar_rise
-
-        if btc_require_close_above_ma20 and not close_above_ma20:
-            return False, f"BTC MA20 아래 / 3봉 {btc_ret_3_pct:.2f}%"
-
-        if btc_require_ma5_above_ma10 and not ma5_above_ma10:
-            return False, "BTC MA5 <= MA10"
-
-        if close_above_ma20 or not_crashing:
-            return True, f"BTC 통과 / 3봉 {btc_ret_3_pct:.2f}%"
-
-        return False, f"BTC 약세 / 3봉 {btc_ret_3_pct:.2f}%"
-
-    except Exception as e:
-        return False, f"BTC 필터 오류: {e}"
-
-
-# ==================================================
-# 알림 모드별 파라미터
-# ==================================================
-
-def get_params(alert_mode):
+def get_btc_filter(alert_mode):
     """
-    PRE: 예비 알림
-    POST: 확정 알림
+    BTC 4H 필터.
+    - 예비: BTC가 급락 중이면 차단
+    - 확정: BTC close > MA20 조건 포함
     """
-
-    if alert_mode == "POST":
+    df = get_ohlcv("KRW-BTC", interval=ALERT_INTERVAL, count=ALERT_CANDLE_COUNT)
+    if df is None or len(df) < 60:
         return {
-            "min_signal_score": 220,
-            "min_required_volume_ratio": 1.6,
-            "max_short_k": 60.0,
-            "max_short_d": 50.0,
-            "max_middle_k": 55.0,
-            "min_ma20_gap": -4.0,
-            "max_ma20_gap": 2.5,
-            "min_3bar_rise": -3.5,
-            "max_3bar_rise": 4.5,
-            "min_close_position": 0.65,
-            "max_upper_wick_ratio": 0.35,
-            "max_bear_candle_pct": 0.3,
-            "max_signal_candle_return_pct": 3.5,
-            "btc_min_3bar_rise": -1.5,
-            "btc_require_close_above_ma20": True,
-            "btc_require_ma5_above_ma10": False,
+            "pass": False,
+            "reason": "BTC 데이터 부족",
+            "btc_close": 0,
+            "btc_ma20": 0,
+            "btc_3bar": 0
         }
 
+    df = prepare_indicators(df)
+    idx = get_signal_index(df, alert_mode)
+
+    if idx is None or idx < 25:
+        return {
+            "pass": False,
+            "reason": "BTC 인덱스 부족",
+            "btc_close": 0,
+            "btc_ma20": 0,
+            "btc_3bar": 0
+        }
+
+    close = safe_float(df["close"].iloc[idx])
+    ma20 = safe_float(df["ma20"].iloc[idx])
+    close_3ago = safe_float(df["close"].iloc[idx - 3])
+    btc_3bar = percent(close, close_3ago)
+
+    if ma20 <= 0:
+        return {
+            "pass": False,
+            "reason": "BTC MA20 없음",
+            "btc_close": close,
+            "btc_ma20": ma20,
+            "btc_3bar": btc_3bar
+        }
+
+    if alert_mode == "confirmed":
+        passed = close > ma20 and btc_3bar >= -3.0
+        reason = "BTC close > MA20" if passed else "BTC confirmed filter fail"
+    else:
+        passed = close >= ma20 * 0.985 and btc_3bar >= -3.5
+        reason = "BTC not crashing" if passed else "BTC preliminary filter fail"
+
     return {
-        "min_signal_score": 210,
-        "min_required_volume_ratio": 1.5,
-        "max_short_k": 65.0,
-        "max_short_d": 55.0,
-        "max_middle_k": 60.0,
-        "min_ma20_gap": -5.0,
-        "max_ma20_gap": 3.0,
-        "min_3bar_rise": -4.0,
-        "max_3bar_rise": 5.0,
-        "min_close_position": 0.60,
-        "max_upper_wick_ratio": 0.40,
-        "max_bear_candle_pct": 0.3,
-        "max_signal_candle_return_pct": 4.0,
-        "btc_min_3bar_rise": -2.0,
-        "btc_require_close_above_ma20": True,
-        "btc_require_ma5_above_ma10": False,
+        "pass": passed,
+        "reason": reason,
+        "btc_close": close,
+        "btc_ma20": ma20,
+        "btc_3bar": btc_3bar
     }
 
 
-# ==================================================
-# 신호 판단
-# ==================================================
+# =========================
+# 8. SIGNAL SCORE
+# =========================
 
-def judge_signal_at(
-    df,
-    idx,
-    btc_df,
-    params,
-    oversold_lookback=12,
-    volume_ratio_threshold=1.3,
-):
-    if idx < 80:
+def calculate_base_score(metrics, alert_mode):
+    """
+    기존 조건검색용 기본 점수.
+    점수 자체는 후보 선별용이고,
+    V3.3 등급은 별도 alert_grade에서 계산한다.
+    """
+    score = 0
+
+    volume_ratio = metrics["volume_ratio"]
+    short_k = metrics["short_k"]
+    short_d = metrics["short_d"]
+    mid_k = metrics["mid_k"]
+    ma20_dev = metrics["ma20_dev"]
+    recent_3bar = metrics["recent_3bar"]
+    close_position = metrics["close_position"]
+    upper_wick_ratio = metrics["upper_wick_ratio"]
+    candle_change = metrics["candle_change"]
+    ma5_up = metrics["ma5_up"]
+    bullish_ok = metrics["bullish_ok"]
+
+    # 거래대금
+    if volume_ratio >= 2.0:
+        score += 60
+    elif volume_ratio >= 1.7:
+        score += 50
+    elif volume_ratio >= 1.5:
+        score += 40
+    elif volume_ratio >= 1.3:
+        score += 30
+
+    # 단기 Stoch RSI
+    if 20 <= short_k <= 55 and short_d <= 50:
+        score += 55
+    elif short_k <= 65 and short_d <= 55:
+        score += 45
+    elif short_k <= 70 and short_d <= 60:
+        score += 30
+
+    # 중기 K
+    if mid_k <= 45:
+        score += 35
+    elif mid_k <= 60:
+        score += 25
+    elif mid_k <= 65:
+        score += 15
+
+    # MA20 근처
+    if -2.0 <= ma20_dev <= 2.0:
+        score += 35
+    elif -4.0 <= ma20_dev <= 4.0:
+        score += 25
+    elif -6.0 <= ma20_dev <= 6.0:
+        score += 15
+
+    # 최근 3봉
+    if 0 <= recent_3bar <= 4.0:
+        score += 30
+    elif -2.0 <= recent_3bar <= 5.0:
+        score += 20
+    elif recent_3bar >= -5.0:
+        score += 10
+
+    # 캔들 품질
+    if close_position >= 0.85:
+        score += 35
+    elif close_position >= 0.70:
+        score += 25
+    elif close_position >= 0.55:
+        score += 15
+
+    if upper_wick_ratio <= 0.15:
+        score += 30
+    elif upper_wick_ratio <= 0.30:
+        score += 20
+    elif upper_wick_ratio <= 0.45:
+        score += 10
+
+    # 캔들 상승률
+    if 1.0 <= candle_change <= 3.5:
+        score += 25
+    elif 0.2 <= candle_change <= 4.0:
+        score += 15
+    elif candle_change <= 5.0:
+        score += 5
+
+    # MA5 상승
+    if ma5_up:
+        score += 20
+
+    # 음봉 과도 방지
+    if bullish_ok:
+        score += 15
+
+    return score
+
+
+# =========================
+# 9. CANDIDATE METRICS
+# =========================
+
+def calculate_candidate_metrics(market, df, alert_mode):
+    df = prepare_indicators(df)
+
+    idx = get_signal_index(df, alert_mode)
+    if idx is None or idx < 30:
         return None
 
     row = df.iloc[idx]
     prev = df.iloc[idx - 1]
-    prev2 = df.iloc[idx - 2]
-    prev3 = df.iloc[idx - 3]
 
-    score = 0
-    reasons = []
+    open_price = safe_float(row["open"])
+    high_price = safe_float(row["high"])
+    low_price = safe_float(row["low"])
+    close_price = safe_float(row["close"])
+    value = safe_float(row["value"])
 
-    # BTC 필터
-    btc_ok, btc_reason = check_btc_filter_at(
-        btc_df=btc_df,
-        signal_time=df.index[idx],
-        btc_min_3bar_rise=params["btc_min_3bar_rise"],
-        btc_require_close_above_ma20=params["btc_require_close_above_ma20"],
-        btc_require_ma5_above_ma10=params["btc_require_ma5_above_ma10"],
-    )
+    ma20 = safe_float(row["ma20"])
+    ma5 = safe_float(row["ma5"])
+    prev_ma5 = safe_float(prev["ma5"])
 
-    if not btc_ok:
+    if open_price <= 0 or high_price <= 0 or low_price <= 0 or close_price <= 0:
         return None
 
-    score += 10
-    reasons.append(btc_reason)
-
-    # 과매도 이력
-    recent = df.iloc[max(0, idx - oversold_lookback + 1):idx + 1]
-
-    oversold_recent_short = (
-        (recent["short_k"] <= 20) | (recent["short_d"] <= 20)
-    ).any()
-
-    oversold_recent_middle = (
-        (recent["middle_k"] <= 20) | (recent["middle_d"] <= 20)
-    ).any()
-
-    oversold_recent_long = (
-        (recent["long_k"] <= 20) | (recent["long_d"] <= 20)
-    ).any()
-
-    oversold_count = sum([
-        bool(oversold_recent_short),
-        bool(oversold_recent_middle),
-        bool(oversold_recent_long),
-    ])
-
-    if oversold_recent_short:
-        score += 25
-        reasons.append("단기 과매도 이력")
-
-    if oversold_recent_middle:
-        score += 30
-        reasons.append("중기 과매도 이력")
-
-    if oversold_recent_long:
-        score += 35
-        reasons.append("장기 과매도 이력")
-
-    if oversold_count == 0:
+    if ma20 <= 0:
         return None
 
-    # 단기 Stoch RSI
+    value_ma20_prev = safe_float(row["value_ma20_prev"])
+    if value_ma20_prev <= 0:
+        return None
+
+    volume_ratio = value / value_ma20_prev
+
     short_k = safe_float(row["short_k"])
     short_d = safe_float(row["short_d"])
-    prev_short_k = safe_float(prev["short_k"])
-    prev_short_d = safe_float(prev["short_d"])
+    mid_k = safe_float(row["mid_k"])
 
-    if short_k is None or short_d is None or prev_short_k is None or prev_short_d is None:
-        return None
+    ma20_dev = percent(close_price, ma20)
 
-    if short_k > params["max_short_k"]:
-        return None
+    close_3ago = safe_float(df["close"].iloc[idx - 3])
+    recent_3bar = percent(close_price, close_3ago)
 
-    if short_d > params["max_short_d"]:
-        return None
+    candle_change = percent(close_price, open_price)
 
-    kd_cross = short_k > short_d and prev_short_k <= prev_short_d
-    kd_above = short_k > short_d
-    k_recover_20 = prev_short_k <= 20 and short_k > 20
-    k_rising = short_k > prev_short_k
-
-    if kd_cross:
-        score += 30
-        reasons.append("단기 K>D 골든크로스")
-    elif kd_above:
-        score += 18
-        reasons.append("단기 K>D 유지")
-
-    if k_recover_20:
-        score += 35
-        reasons.append("단기 K 20 회복")
-    elif k_rising:
-        score += 15
-        reasons.append("단기 K 상승")
-
-    if not (kd_above or k_recover_20):
-        return None
-
-    # 중기 Stoch RSI
-    middle_k = safe_float(row["middle_k"])
-    prev_middle_k = safe_float(prev["middle_k"])
-
-    if middle_k is not None and middle_k > params["max_middle_k"]:
-        return None
-
-    if middle_k is not None and prev_middle_k is not None:
-        if middle_k > prev_middle_k and middle_k < 80:
-            score += 20
-            reasons.append("중기 K 상승")
-
-    # 거래대금
-    volume_ratio = safe_float(row["volume_ratio"])
-
-    if volume_ratio is None or volume_ratio < params["min_required_volume_ratio"]:
-        return None
-
-    if volume_ratio >= volume_ratio_threshold:
-        score += 35
-        reasons.append(f"거래대금 증가 x{volume_ratio:.2f}")
+    candle_range = high_price - low_price
+    if candle_range <= 0:
+        close_position = 0.5
+        upper_wick_ratio = 0.5
     else:
-        score += 15
-        reasons.append(f"거래대금 완만 증가 x{volume_ratio:.2f}")
+        close_position = (close_price - low_price) / candle_range
+        upper_wick_ratio = (high_price - close_price) / candle_range
 
-    # MA / 캔들 품질
-    close = safe_float(row["close"])
-    ma5 = safe_float(row["ma5"])
-    ma10 = safe_float(row["ma10"])
-    ma20 = safe_float(row["ma20"])
+    ma5_up = ma5 > prev_ma5 if is_number(ma5) and is_number(prev_ma5) else False
 
-    if close is None or ma5 is None or ma10 is None or ma20 is None:
-        return None
+    # 강한 음봉 제외: close >= 0.995 * open
+    bullish_ok = close_price >= open_price * 0.995
 
-    close_position = safe_float(row.get("close_position"))
-    upper_wick_ratio = safe_float(row.get("upper_wick_ratio"))
-    candle_return_pct = safe_float(row.get("candle_return_pct"))
-    ma5_slope_up = bool(row.get("ma5_slope_up"))
+    metrics = {
+        "market": market,
+        "price": close_price,
+        "open": open_price,
+        "high": high_price,
+        "low": low_price,
+        "value": value,
 
-    if close_position is None or upper_wick_ratio is None or candle_return_pct is None:
-        return None
-
-    if close_position < params["min_close_position"]:
-        return None
-
-    if upper_wick_ratio > params["max_upper_wick_ratio"]:
-        return None
-
-    if candle_return_pct < -abs(params["max_bear_candle_pct"]):
-        return None
-
-    if candle_return_pct > params["max_signal_candle_return_pct"]:
-        return None
-
-    if not ma5_slope_up:
-        return None
-
-    score += 20
-    reasons.append(
-        f"캔들품질 통과 / 종가위치 {close_position:.2f} / 윗꼬리 {upper_wick_ratio:.2f} / 캔들 {candle_return_pct:.2f}%"
-    )
-
-    score += 10
-    reasons.append("MA5 상승기울기")
-
-    if close > ma5:
-        score += 15
-        reasons.append("MA5 회복")
-
-    if close > ma10:
-        score += 10
-        reasons.append("MA10 회복")
-
-    # MACD
-    hist = safe_float(row["macd_hist"])
-    hist1 = safe_float(prev["macd_hist"])
-    hist2 = safe_float(prev2["macd_hist"])
-    hist3 = safe_float(prev3["macd_hist"])
-
-    if None not in [hist, hist1, hist2, hist3]:
-        if hist > hist1 > hist2:
-            score += 25
-            reasons.append("MACD 3봉 개선")
-        elif hist > hist1:
-            score += 10
-            reasons.append("MACD 개선")
-
-    # 급락 / 과열 / MA20 이격
-    ret_3 = safe_float(row["ret_3"])
-
-    if ret_3 is None:
-        return None
-
-    three_bar_rise_pct = ret_3 * 100
-    ma20_gap_pct = ((close - ma20) / ma20) * 100 if ma20 else 0
-
-    if three_bar_rise_pct < params["min_3bar_rise"]:
-        return None
-
-    if three_bar_rise_pct > params["max_3bar_rise"]:
-        return None
-
-    if ma20_gap_pct < params["min_ma20_gap"]:
-        return None
-
-    if ma20_gap_pct > params["max_ma20_gap"]:
-        return None
-
-    if score < params["min_signal_score"]:
-        return None
-
-    return {
-        "ticker": None,
-        "signal_time": df.index[idx],
-        "score": score,
-        "close": close,
+        "volume_ratio": volume_ratio,
         "short_k": short_k,
         "short_d": short_d,
-        "middle_k": middle_k,
-        "volume_ratio": volume_ratio,
-        "ma20_gap_pct": ma20_gap_pct,
-        "three_bar_rise_pct": three_bar_rise_pct,
+        "mid_k": mid_k,
+        "ma20_dev": ma20_dev,
+        "recent_3bar": recent_3bar,
         "close_position": close_position,
         "upper_wick_ratio": upper_wick_ratio,
-        "candle_return_pct": candle_return_pct,
-        "reason": " / ".join(reasons),
+        "candle_change": candle_change,
+        "ma5_up": ma5_up,
+        "bullish_ok": bullish_ok,
     }
 
+    score = calculate_base_score(metrics, alert_mode)
+    metrics["score"] = score
 
-# ==================================================
-# 스캔
-# ==================================================
+    return metrics
 
-def scan_market():
-    alert_mode = detect_alert_mode()
-    params = get_params(alert_mode)
 
-    interval = os.getenv("ALERT_INTERVAL", "minute240")
-    count = int(os.getenv("ALERT_CANDLE_COUNT", "700"))
-    request_delay = float(os.getenv("REQUEST_DELAY", "0.12"))
+# =========================
+# 10. FILTERS
+# =========================
 
-    max_alert_count = int(os.getenv("MAX_ALERT_COUNT", "10"))
+def pass_preliminary_filter(c):
+    """
+    예비 알림:
+    - score >= 200
+    - volume_ratio >= 1.3
+    - K <= 70
+    - D <= 60
+    - MA20 -6% ~ +6%
+    - 최근 3봉 >= -5%
+    - 캔들 품질
+    - MA5 상승
+    """
+    if c["score"] < 200:
+        return False
 
-    markets = get_krw_markets()
-    markets = [
-        x for x in markets
-        if x not in STABLE_EXCLUDES and x != "KRW-BTC"
-    ]
+    if c["volume_ratio"] < 1.3:
+        return False
 
-    btc_df = get_btc_indicator_df(interval=interval, count=count + 50)
+    if c["short_k"] > 70:
+        return False
 
-    results = []
+    if c["short_d"] > 60:
+        return False
 
-    for idx, ticker in enumerate(markets):
-        try:
-            df = get_ohlcv(ticker, interval=interval, count=count)
+    if not (-6.0 <= c["ma20_dev"] <= 6.0):
+        return False
 
-            if df is None or len(df) < 120:
-                time.sleep(request_delay)
-                continue
+    if c["recent_3bar"] < -5.0:
+        return False
 
-            df = prepare_indicators(df)
-            df = df.dropna().copy()
+    if c["close_position"] < 0.55:
+        return False
 
-            if len(df) < 120:
-                time.sleep(request_delay)
-                continue
+    if c["upper_wick_ratio"] > 0.45:
+        return False
 
-            # PRE: 현재 진행 중인 4H 봉 기준
-            # POST: 방금 마감된 4H 봉 기준
-            if alert_mode == "POST":
-                signal_idx = len(df) - 2
-            else:
-                signal_idx = len(df) - 1
+    if c["candle_change"] > 5.0:
+        return False
 
-            signal = judge_signal_at(
-                df=df,
-                idx=signal_idx,
-                btc_df=btc_df,
-                params=params,
-                oversold_lookback=12,
-                volume_ratio_threshold=params["min_required_volume_ratio"],
-            )
+    if not c["bullish_ok"]:
+        return False
 
-            if signal:
-                signal["ticker"] = ticker
-                results.append(signal)
+    if not c["ma5_up"]:
+        return False
 
-            time.sleep(request_delay)
+    return True
 
-        except Exception as e:
-            print(f"[ERROR] {ticker}: {e}")
-            time.sleep(request_delay)
 
-    results = sorted(
-        results,
-        key=lambda x: (x["score"], x["volume_ratio"]),
-        reverse=True
+def pass_confirmed_filter(c):
+    """
+    확정 알림:
+    - score >= 210
+    - volume_ratio >= 1.5
+    - K 20~65
+    - D <= 55
+    - MA20 -5% ~ +5%
+    - 최근 3봉 >= -4%
+    - 종가위치 >= 0.55
+    - 윗꼬리 <= 0.45
+    - 캔들 상승 <= 4%
+    - MA5 상승
+    """
+    if c["score"] < 210:
+        return False
+
+    if c["volume_ratio"] < 1.5:
+        return False
+
+    if not (20 <= c["short_k"] <= 65):
+        return False
+
+    if c["short_d"] > 55:
+        return False
+
+    if not (-5.0 <= c["ma20_dev"] <= 5.0):
+        return False
+
+    if c["recent_3bar"] < -4.0:
+        return False
+
+    if c["close_position"] < 0.55:
+        return False
+
+    if c["upper_wick_ratio"] > 0.45:
+        return False
+
+    if c["candle_change"] > 4.0:
+        return False
+
+    if not c["bullish_ok"]:
+        return False
+
+    if not c["ma5_up"]:
+        return False
+
+    return True
+
+
+# =========================
+# 11. V3.3 ALERT GRADING
+# =========================
+
+def calculate_alert_grade(candidate):
+    """
+    V3.3 텔레그램 표시용 등급 계산.
+    기존 매수 필터를 바꾸는 것이 아니라,
+    알림 내 우선순위와 보기 편한 등급만 정리한다.
+    """
+
+    score = safe_float(get_value(candidate, ["score", "signal_score", "점수"], 0))
+    volume_ratio = safe_float(get_value(candidate, ["volume_ratio", "vol_ratio", "turnover_ratio", "거래대금비율"], 0))
+    short_k = safe_float(get_value(candidate, ["short_k", "k", "stoch_k", "K"], 100))
+    short_d = safe_float(get_value(candidate, ["short_d", "d", "stoch_d", "D"], 100))
+    mid_k = safe_float(get_value(candidate, ["mid_k", "middle_k", "중기K"], 100))
+    ma20_dev = safe_float(get_value(candidate, ["ma20_dev", "ma20_deviation", "ma20_gap", "MA20"], 999))
+    close_position = safe_float(get_value(candidate, ["close_position", "close_pos", "종가위치"], 0))
+    upper_wick_ratio = safe_float(get_value(candidate, ["upper_wick_ratio", "upper_wick", "윗꼬리"], 1))
+    candle_change = safe_float(get_value(candidate, ["candle_change", "candle_rise", "candle_pct", "캔들"], 0))
+
+    quality_score = 0
+
+    # 1) 종가위치
+    if close_position >= 0.90:
+        quality_score += 30
+    elif close_position >= 0.80:
+        quality_score += 20
+    elif close_position >= 0.70:
+        quality_score += 10
+    elif close_position < 0.60:
+        quality_score -= 15
+
+    # 2) 윗꼬리
+    if upper_wick_ratio <= 0.10:
+        quality_score += 30
+    elif upper_wick_ratio <= 0.20:
+        quality_score += 20
+    elif upper_wick_ratio <= 0.30:
+        quality_score += 10
+    elif upper_wick_ratio > 0.40:
+        quality_score -= 20
+
+    # 3) 거래대금 증가
+    if volume_ratio >= 2.0:
+        quality_score += 25
+    elif volume_ratio >= 1.7:
+        quality_score += 20
+    elif volume_ratio >= 1.5:
+        quality_score += 10
+    elif volume_ratio < 1.3:
+        quality_score -= 20
+
+    # 4) MA20 이격
+    if -2.0 <= ma20_dev <= 2.0:
+        quality_score += 20
+    elif -3.0 <= ma20_dev <= 3.0:
+        quality_score += 10
+    elif ma20_dev > 4.0:
+        quality_score -= 20
+
+    # 5) 캔들 상승률
+    if 1.0 <= candle_change <= 3.5:
+        quality_score += 20
+    elif 0.3 <= candle_change < 1.0:
+        quality_score += 8
+    elif candle_change > 4.0:
+        quality_score -= 20
+
+    # 6) Stoch RSI
+    if short_k <= 45 and short_d <= 45:
+        quality_score += 15
+    elif short_k <= 60 and short_d <= 55:
+        quality_score += 8
+    elif short_k > 70 or short_d > 60:
+        quality_score -= 20
+
+    # 7) 중기 K
+    if mid_k <= 50:
+        quality_score += 8
+    elif mid_k > 65:
+        quality_score -= 12
+
+    alert_score = score + quality_score
+
+    # A급 조건
+    is_a_grade = (
+        score >= 230
+        and volume_ratio >= 1.70
+        and close_position >= 0.85
+        and upper_wick_ratio <= 0.15
+        and -2.0 <= ma20_dev <= 2.0
+        and 1.0 <= candle_change <= 3.5
+        and short_k <= 55
     )
 
-    return alert_mode, results[:max_alert_count], len(markets)
+    # B급 조건
+    is_b_grade = (
+        score >= 220
+        and volume_ratio >= 1.50
+        and close_position >= 0.70
+        and upper_wick_ratio <= 0.30
+        and -3.0 <= ma20_dev <= 3.0
+        and candle_change <= 4.0
+    )
 
-
-# ==================================================
-# 메시지 포맷
-# ==================================================
-
-def build_message(alert_mode, signals, market_count):
-    now = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
-
-    if alert_mode == "POST":
-        title = "🟢 4H 마감 후 상승전환 확정 후보"
+    if is_a_grade:
+        grade = "A"
+        grade_label = "🔥 A급"
+    elif is_b_grade:
+        grade = "B"
+        grade_label = "🟡 B급"
     else:
-        title = "🟡 4H 마감 1시간 전 상승전조 후보"
+        grade = "WATCH"
+        grade_label = "👀 관찰"
 
-    if not signals:
-        return (
-            f"{title}\n"
-            f"시간: {now} KST\n"
-            f"스캔: 전체 KRW {market_count}개\n\n"
-            f"조건 만족 종목 없음"
+    candidate["alert_quality_score"] = quality_score
+    candidate["alert_score"] = alert_score
+    candidate["alert_grade"] = grade
+    candidate["alert_grade_label"] = grade_label
+
+    return candidate
+
+
+def apply_alert_grades(candidates):
+    graded = []
+    for candidate in candidates:
+        graded.append(calculate_alert_grade(candidate))
+
+    grade_order = {
+        "A": 0,
+        "B": 1,
+        "WATCH": 2
+    }
+
+    graded.sort(
+        key=lambda x: (
+            grade_order.get(x.get("alert_grade", "WATCH"), 9),
+            -safe_float(x.get("alert_score", 0)),
+            -safe_float(x.get("score", 0)),
+            -safe_float(x.get("volume_ratio", 0)),
+            -safe_float(x.get("close_position", 0)),
+            safe_float(x.get("upper_wick_ratio", 1)),
         )
+    )
+
+    return graded
+
+
+# =========================
+# 12. MESSAGE FORMAT
+# =========================
+
+def format_price(price):
+    price = safe_float(price)
+    if price < 1:
+        return f"{price:.8f}".rstrip("0").rstrip(".")
+    if price < 10:
+        return f"{price:.4f}"
+    if price < 100:
+        return f"{price:.3f}"
+    return f"{price:.0f}"
+
+
+def format_candidate_line(index, candidate):
+    market = candidate.get("market") or candidate.get("ticker") or candidate.get("symbol") or "UNKNOWN"
+
+    score = safe_float(candidate.get("score", 0))
+    volume_ratio = safe_float(candidate.get("volume_ratio", 0))
+    short_k = safe_float(candidate.get("short_k", 0))
+    short_d = safe_float(candidate.get("short_d", 0))
+    mid_k = safe_float(candidate.get("mid_k", 0))
+    ma20_dev = safe_float(candidate.get("ma20_dev", 0))
+    recent_3bar = safe_float(candidate.get("recent_3bar", 0))
+    close_position = safe_float(candidate.get("close_position", 0))
+    upper_wick_ratio = safe_float(candidate.get("upper_wick_ratio", 0))
+    candle_change = safe_float(candidate.get("candle_change", 0))
+    price = safe_float(candidate.get("price", 0))
+
+    grade_label = candidate.get("alert_grade_label", "👀 관찰")
+    alert_score = safe_float(candidate.get("alert_score", score))
+    quality_score = safe_float(candidate.get("alert_quality_score", 0))
+
+    return (
+        f"{index}. {market} {grade_label}\n"
+        f"점수 {score:.0f} / 보정 {alert_score:.0f} / 품질 {quality_score:+.0f}\n"
+        f"거래대금 x{volume_ratio:.2f} / K {short_k:.2f} D {short_d:.2f} / 중기K {mid_k:.2f}\n"
+        f"MA20 {ma20_dev:.2f}% / 3봉 {recent_3bar:.2f}% / 종가위치 {close_position:.2f} / 윗꼬리 {upper_wick_ratio:.2f}\n"
+        f"캔들 {candle_change:.2f}% / 가격 {format_price(price)}\n"
+    )
+
+
+def build_telegram_message(candidates, alert_mode, scan_count, btc_info):
+    candidates = apply_alert_grades(candidates)
+
+    if alert_mode == "preliminary":
+        title = "🟡 4H 마감 1시간 전 상승전조 후보"
+    else:
+        title = "🟢 4H 마감 후 상승전환 확정 후보"
 
     lines = []
     lines.append(title)
-    lines.append(f"시간: {now} KST")
-    lines.append(f"스캔: 전체 KRW {market_count}개")
-    lines.append(f"후보: {len(signals)}개")
+    lines.append(f"시간: {format_now()}")
+    lines.append(f"스캔: 전체 KRW {scan_count}개")
+    lines.append(f"후보: {len(candidates)}개")
+
+    if btc_info:
+        btc_close = safe_float(btc_info.get("btc_close", 0))
+        btc_ma20 = safe_float(btc_info.get("btc_ma20", 0))
+        btc_3bar = safe_float(btc_info.get("btc_3bar", 0))
+        btc_status = "통과" if btc_info.get("pass") else "차단"
+        lines.append(
+            f"BTC필터: {btc_status} / BTC {format_price(btc_close)} / MA20 {format_price(btc_ma20)} / 3봉 {btc_3bar:.2f}%"
+        )
+
     lines.append("")
 
-    for i, s in enumerate(signals, start=1):
-        lines.append(f"<b>{i}. {s['ticker']}</b>")
+    a_candidates = [c for c in candidates if c.get("alert_grade") == "A"]
+    b_candidates = [c for c in candidates if c.get("alert_grade") == "B"]
+    watch_candidates = [c for c in candidates if c.get("alert_grade") == "WATCH"]
+
+    index = 1
+
+    if a_candidates:
+        lines.append("🔥 A급 우선 후보")
+        for candidate in a_candidates:
+            lines.append(format_candidate_line(index, candidate))
+            index += 1
+
+    if b_candidates:
+        lines.append("🟡 B급 후보")
+        for candidate in b_candidates:
+            lines.append(format_candidate_line(index, candidate))
+            index += 1
+
+    if watch_candidates:
+        lines.append("👀 관찰 후보")
+        for candidate in watch_candidates:
+            lines.append(format_candidate_line(index, candidate))
+            index += 1
+
+    lines.append("※ 자동매매 아님. 진입 전 호가/거래대금/BTC 상태 확인 필요.")
+    lines.append("※ A급은 우선 검토 대상일 뿐, 매수 확정 신호가 아닙니다.")
+    lines.append("※ 손절 기준과 BTC 4H 흐름을 반드시 확인하세요.")
+
+    return "\n".join(lines)
+
+
+def build_empty_message(alert_mode, scan_count, btc_info):
+    if alert_mode == "preliminary":
+        title = "🟡 4H 마감 1시간 전 상승전조 후보"
+    else:
+        title = "🟢 4H 마감 후 상승전환 확정 후보"
+
+    lines = []
+    lines.append(title)
+    lines.append(f"시간: {format_now()}")
+    lines.append(f"스캔: 전체 KRW {scan_count}개")
+    lines.append("후보: 0개")
+    lines.append("")
+
+    if btc_info:
+        btc_close = safe_float(btc_info.get("btc_close", 0))
+        btc_ma20 = safe_float(btc_info.get("btc_ma20", 0))
+        btc_3bar = safe_float(btc_info.get("btc_3bar", 0))
+        btc_status = "통과" if btc_info.get("pass") else "차단"
         lines.append(
-            f"점수 {s['score']} / 거래대금 x{fmt(s['volume_ratio'])} / "
-            f"K {fmt(s['short_k'])} D {fmt(s['short_d'])} / 중기K {fmt(s['middle_k'])}"
-        )
-        lines.append(
-            f"MA20 {fmt(s['ma20_gap_pct'])}% / 3봉 {fmt(s['three_bar_rise_pct'])}% / "
-            f"종가위치 {fmt(s['close_position'])} / 윗꼬리 {fmt(s['upper_wick_ratio'])}"
-        )
-        lines.append(
-            f"캔들 {fmt(s['candle_return_pct'])}% / 가격 {fmt(s['close'], 4)}"
+            f"BTC필터: {btc_status} / BTC {format_price(btc_close)} / MA20 {format_price(btc_ma20)} / 3봉 {btc_3bar:.2f}%"
         )
         lines.append("")
 
-    lines.append("※ 자동매매 아님. 진입 전 호가/거래대금/BTC 상태 확인 필요.")
+    lines.append("조건 만족 종목 없음")
+    lines.append("※ 현재 조건에서는 무리한 매수보다 관망이 우선입니다.")
 
-    text = "\n".join(lines)
-
-    # 텔레그램 메시지 길이 제한 대응
-    if len(text) > 3900:
-        text = text[:3900] + "\n\n...메시지 길이 제한으로 일부 생략"
-
-    return text
+    return "\n".join(lines)
 
 
-# ==================================================
-# main
-# ==================================================
+def build_error_message(error_text):
+    return (
+        "🔴 Telegram Coin Alert 오류 발생\n"
+        f"시간: {format_now()}\n"
+        f"오류:\n{error_text}"
+    )
+
+
+# =========================
+# 13. SCANNER
+# =========================
+
+def scan_markets(alert_mode, btc_info):
+    markets = get_krw_markets()
+    scan_count = len(markets)
+
+    candidates = []
+
+    # BTC 필터 실패 시 전체 차단.
+    if not btc_info.get("pass", False):
+        return candidates, scan_count
+
+    for i, market in enumerate(markets, start=1):
+        try:
+            # BTC 자체는 시장 필터용으로만 사용하고 후보에서는 제외.
+            if market == "KRW-BTC":
+                continue
+
+            # 스테이블/법정화폐성 종목 제외.
+            if market in ["KRW-USDT", "KRW-USDC"]:
+                continue
+
+            df = get_ohlcv(market, interval=ALERT_INTERVAL, count=ALERT_CANDLE_COUNT)
+            if df is None or len(df) < 60:
+                time.sleep(REQUEST_DELAY)
+                continue
+
+            metrics = calculate_candidate_metrics(market, df, alert_mode)
+            if metrics is None:
+                time.sleep(REQUEST_DELAY)
+                continue
+
+            if alert_mode == "confirmed":
+                passed = pass_confirmed_filter(metrics)
+            else:
+                passed = pass_preliminary_filter(metrics)
+
+            if passed:
+                candidates.append(metrics)
+
+            time.sleep(REQUEST_DELAY)
+
+        except Exception:
+            # 개별 종목 오류는 전체 실행을 막지 않는다.
+            time.sleep(REQUEST_DELAY)
+            continue
+
+    candidates = apply_alert_grades(candidates)
+
+    if MAX_ALERT_COUNT > 0:
+        candidates = candidates[:MAX_ALERT_COUNT]
+
+    return candidates, scan_count
+
+
+# =========================
+# 14. MAIN
+# =========================
 
 def main():
-    alert_mode, signals, market_count = scan_market()
+    print("========================================")
+    print("Telegram Coin Alert Bot V3.3 started")
+    print(f"Time: {format_now()}")
+    print(f"Interval: {ALERT_INTERVAL}")
+    print(f"Candle count: {ALERT_CANDLE_COUNT}")
+    print(f"Request delay: {REQUEST_DELAY}")
+    print(f"Max alert count: {MAX_ALERT_COUNT}")
+    print(f"Send empty alert: {SEND_EMPTY_ALERT}")
+    print("========================================")
 
-    send_empty = os.getenv("SEND_EMPTY_ALERT", "true").lower() == "true"
+    alert_mode = detect_alert_mode()
+    print(f"Alert mode: {alert_mode}")
 
-    if not signals and not send_empty:
-        print("조건 만족 종목 없음. 메시지 전송 생략.")
-        return
+    btc_info = get_btc_filter(alert_mode)
+    print(f"BTC filter: {btc_info}")
 
-    message = build_message(alert_mode, signals, market_count)
+    candidates, scan_count = scan_markets(alert_mode, btc_info)
+    print(f"Scan count: {scan_count}")
+    print(f"Candidate count: {len(candidates)}")
 
-    print(message)
+    if candidates:
+        message = build_telegram_message(
+            candidates=candidates,
+            alert_mode=alert_mode,
+            scan_count=scan_count,
+            btc_info=btc_info
+        )
+        print(message)
+        send_telegram_message(message)
 
-    send_telegram_message(message)
+    else:
+        if SEND_EMPTY_ALERT:
+            message = build_empty_message(
+                alert_mode=alert_mode,
+                scan_count=scan_count,
+                btc_info=btc_info
+            )
+            print(message)
+            send_telegram_message(message)
+        else:
+            print("No candidates and SEND_EMPTY_ALERT=false. Telegram message skipped.")
 
-    print("텔레그램 전송 완료")
+    print("Telegram Coin Alert Bot V3.3 finished")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        error_text = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+        print(error_text)
 
+        try:
+            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                send_telegram_message(build_error_message(error_text[:3000]))
+        except Exception as telegram_error:
+            print(f"Telegram error message failed: {telegram_error}")
+
+        raise
