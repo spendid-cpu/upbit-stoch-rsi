@@ -21,9 +21,9 @@
       "ma20_dev": 2.737157855268091,
       "recent_3bar": 3.007518796992481,
       "status": "active",
-      "last_price": 136.0,
-      "last_return_rate": -0.7299270072992692,
-      "last_checked_kst": "2026-05-06 23:45:48 KST"
+      "last_price": 137.0,
+      "last_return_rate": 0.0,
+      "last_checked_kst": "2026-05-07 02:51:33 KST"
     },
     {
       "market": "KRW-APT",
@@ -46,9 +46,9 @@
       "ma20_dev": 2.4358491212443045,
       "recent_3bar": 3.891591382904802,
       "status": "active",
-      "last_price": 1498.0,
-      "last_return_rate": 0.20066889632106566,
-      "last_checked_kst": "2026-05-06 23:45:48 KST"
+      "last_price": 1490.0,
+      "last_return_rate": -0.33444816053511683,
+      "last_checked_kst": "2026-05-07 02:51:33 KST"
     },
     {
       "market": "KRW-VANA",
@@ -71,9 +71,9 @@
       "ma20_dev": 2.656923867623062,
       "recent_3bar": 2.4988844265952714,
       "status": "active",
-      "last_price": 2325.0,
-      "last_return_rate": 1.2189812799303423,
-      "last_checked_kst": "2026-05-06 23:45:48 KST"
+      "last_price": 2331.0,
+      "last_return_rate": 1.480191554201138,
+      "last_checked_kst": "2026-05-07 02:51:33 KST"
     },
     {
       "market": "KRW-IOST",
@@ -96,9 +96,31 @@
       "ma20_dev": 2.8391167192429068,
       "recent_3bar": 2.515723270440229,
       "status": "active",
-      "last_price": 1.63,
-      "last_return_rate": 0.0,
-      "last_checked_kst": "2026-05-06 23:45:48 KST"
+      "last_price": 1.62,
+      "last_return_rate": -0.6134969325153228,
+      "last_checked_kst": "2026-05-07 02:51:33 KST"
+    },
+    {
+      "market": "KRW-KAITO",
+      "entry_price": 737.0,
+      "tp_price": 773.85,
+      "sl_price": 707.52,
+      "take_profit_rate": 0.05,
+      "stop_loss_rate": 0.04,
+      "max_hold_hours": 48,
+      "alert_time_utc": "2026-05-06T17:54:19.428304+00:00",
+      "alert_time_kst": "2026-05-07 02:54:19 KST",
+      "signal_candle_start_kst": "2026-05-06 21:00:00 KST",
+      "signal_candle_close_kst": "2026-05-07 01:00:00 KST",
+      "grade": "B",
+      "grade_label": "🟡 B급",
+      "score": 280,
+      "value": 368608959.3944868,
+      "volume_ratio": 1.8861309363410035,
+      "candle_change": 2.646239554317553,
+      "ma20_dev": 2.696300424998266,
+      "recent_3bar": 3.656821378340358,
+      "status": "active"
     }
   ],
   "closed": []
