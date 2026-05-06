@@ -1263,13 +1263,16 @@ def main():
     candidates, meta = scan_markets()
 
     # 4) 텔레그램 알림
-    if candidates:
-        msg = build_telegram_message(candidates, meta, active_summary=active_summary)
-        print(msg)
-        send_telegram_message(msg)
+if candidates:
+    added = add_new_signals_to_state(state, candidates)
+    print(f"Added new active signals: {added}")
 
-        added = add_new_signals_to_state(state, candidates)
-        print(f"Added new active signals: {added}")
+    save_signal_state(state)
+
+    msg = build_telegram_message(candidates, meta, active_summary=active_summary)
+    print(msg)
+    send_telegram_message(msg)
+
 
     else:
         if SEND_EMPTY_ALERT:
