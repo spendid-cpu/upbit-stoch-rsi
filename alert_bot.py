@@ -8,16 +8,15 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 
 # =========================================================
-# Telegram Coin Alert Bot V3.7
+# Telegram Coin Alert Bot V3.7 Fixed
 # ---------------------------------------------------------
-# 핵심:
 # - 4H 확정봉만 분석
 # - 진행 중인 최신봉 제거
 # - A/B 등급만 알림 및 추적
 # - WATCH 등급 제외
 # - TP +5%, SL -4%, 48시간 추적
+# - active_signals.json 저장
 # - 분석 기준봉 시작/마감/실행시간 표시
-# - 백테스트 V1.1과 최대한 동일한 필터/점수/정렬 기준 적용
 # =========================================================
 
 UPBIT_BASE_URL = "https://api.upbit.com/v1"
@@ -29,7 +28,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 ALERT_INTERVAL = os.getenv("ALERT_INTERVAL", "minute240").strip()
-ALERT_CANDLE_COUNT = int(os.getenv("ALERT_CANDLE_COUNT", "500"))
+ALERT_CANDLE_COUNT = int(os.getenv("ALERT_CANDLE_COUNT", "200"))
 REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0.08"))
 MAX_ALERT_COUNT = int(os.getenv("MAX_ALERT_COUNT", "10"))
 SEND_EMPTY_ALERT = os.getenv("SEND_EMPTY_ALERT", "true").strip().lower() == "true"
@@ -45,15 +44,12 @@ SIGNAL_COOLDOWN_HOURS = int(os.getenv("SIGNAL_COOLDOWN_HOURS", "12"))
 MIN_4H_TRADE_VALUE = float(os.getenv("MIN_4H_TRADE_VALUE", "150000000"))
 MIN_CANDLE_CHANGE = float(os.getenv("MIN_CANDLE_CHANGE", "0.7"))
 
-# 알림/추적 허용 등급
 ALLOWED_ALERT_GRADES = ["A", "B"]
-
-# 4H 기준
 CANDLE_HOURS = 4
 
 
 # =========================================================
-# TIME UTILS
+# TIME / SAFE UTILS
 # =========================================================
 def now_utc():
     return datetime.now(timezone.utc)
@@ -79,12 +75,12 @@ def parse_dt(value):
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
-        try:
-            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        except Exception:
-            return None
+        return None
 
 
 def safe_float(value, default=0.0):
@@ -188,16 +184,17 @@ def get_krw_markets():
         market = item.get("market", "")
         if not market.startswith("KRW-"):
             continue
-
         if market in ["KRW-BTC", "KRW-USDT", "KRW-USDC"]:
             continue
-
         markets.append(market)
 
     return sorted(markets)
 
 
 def fetch_4h_candles(market, count=ALERT_CANDLE_COUNT):
+    # Upbit 캔들 API는 200개 이하가 안정적
+    count = min(int(count), 200)
+
     data = upbit_get(
         "/candles/minutes/240",
         params={
@@ -214,6 +211,9 @@ def fetch_4h_candles(market, count=ALERT_CANDLE_COUNT):
     df = pd.DataFrame(data)
 
     if df.empty:
+        return pd.DataFrame()
+
+    if "candle_date_time_utc" not in df.columns:
         return pd.DataFrame()
 
     df["dt_utc"] = pd.to_datetime(df["candle_date_time_utc"], utc=True)
@@ -233,7 +233,6 @@ def fetch_4h_candles(market, count=ALERT_CANDLE_COUNT):
 
     for col in needed:
         if col not in df.columns:
-            print(f"{market}: missing column {col}")
             return pd.DataFrame()
 
     for col in ["open", "high", "low", "close", "value", "volume"]:
@@ -250,8 +249,6 @@ def fetch_tickers(markets):
         return {}
 
     result = {}
-
-    # Upbit ticker는 쉼표로 여러 마켓 조회 가능
     chunk_size = 100
 
     for i in range(0, len(markets), chunk_size):
@@ -264,7 +261,8 @@ def fetch_tickers(markets):
 
         for item in data:
             market = item.get("market")
-            result[market] = item
+            if market:
+                result[market] = item
 
     return result
 
@@ -284,8 +282,7 @@ def get_current_prices(markets):
 # =========================================================
 def remove_incomplete_current_candle(df):
     """
-    핵심:
-    Upbit 4H API 최신봉은 진행 중인 봉일 수 있음.
+    Upbit 4H API 최신봉은 진행 중일 수 있음.
     현재 시간이 최신봉 시작 + 4시간 이전이면 최신봉 제거.
     """
     if df.empty:
@@ -302,15 +299,14 @@ def remove_incomplete_current_candle(df):
         latest_start_dt = latest_start_dt.replace(tzinfo=timezone.utc)
 
     latest_close_dt = latest_start_dt + timedelta(hours=CANDLE_HOURS)
-
     current = now_utc()
 
     removed = None
 
     if current < latest_close_dt:
         removed = {
-            "start_utc": latest_start_dt,
-            "close_utc": latest_close_dt,
+            "start_utc": latest_start_dt.isoformat(),
+            "close_utc": latest_close_dt.isoformat(),
             "start_kst": fmt_kst(latest_start_dt),
             "close_kst": fmt_kst(latest_close_dt),
         }
@@ -387,14 +383,13 @@ def add_indicators(df):
 
     rsi_min = df["rsi"].rolling(14).min()
     rsi_max = df["rsi"].rolling(14).max()
-
     stoch_rsi = (df["rsi"] - rsi_min) / (rsi_max - rsi_min).replace(0, np.nan) * 100
+
     df["short_k"] = stoch_rsi.rolling(3).mean().fillna(50)
     df["short_d"] = df["short_k"].rolling(3).mean().fillna(50)
 
     low14 = df["low"].rolling(14).min()
     high14 = df["high"].rolling(14).max()
-
     mid_k = (df["close"] - low14) / (high14 - low14).replace(0, np.nan) * 100
     df["mid_k"] = mid_k.rolling(3).mean().fillna(50)
 
@@ -471,7 +466,6 @@ def calculate_base_score(c):
     ma5_up = bool(c.get("ma5_up"))
     bullish_ok = bool(c.get("bullish_ok", True))
 
-    # 상대 거래대금
     if volume_ratio >= 3.0:
         score += 50
     elif volume_ratio >= 2.0:
@@ -483,7 +477,6 @@ def calculate_base_score(c):
     else:
         score -= 30
 
-    # 절대 4H 거래대금
     if value >= 500_000_000:
         score += 30
     elif value >= 300_000_000:
@@ -493,7 +486,6 @@ def calculate_base_score(c):
     else:
         score -= 30
 
-    # Stoch RSI
     if 20 <= short_k <= 55 and short_d <= 55:
         score += 30
     elif 20 <= short_k <= 70 and short_d <= 60:
@@ -501,13 +493,11 @@ def calculate_base_score(c):
     elif short_k > 75 or short_d > 70:
         score -= 25
 
-    # 중기 K
     if mid_k <= 55:
         score += 10
     elif mid_k > 70:
         score -= 15
 
-    # MA20 이격
     if -2.0 <= ma20_dev <= 2.0:
         score += 25
     elif -5.0 <= ma20_dev <= 5.0:
@@ -515,7 +505,6 @@ def calculate_base_score(c):
     else:
         score -= 25
 
-    # 캔들 상승률
     if 1.0 <= candle_change <= 3.5:
         score += 25
     elif 0.7 <= candle_change <= 4.0:
@@ -523,7 +512,6 @@ def calculate_base_score(c):
     elif candle_change > 4.0:
         score -= 30
 
-    # 최근 3봉
     if -1.0 <= recent_3bar <= 4.0:
         score += 15
     elif -4.0 <= recent_3bar <= 6.0:
@@ -531,7 +519,6 @@ def calculate_base_score(c):
     elif recent_3bar > 6.0:
         score -= 25
 
-    # 캔들 품질
     if close_position >= 0.85:
         score += 20
     elif close_position >= 0.60:
@@ -570,7 +557,6 @@ def calculate_alert_grade(c):
     short_k = safe_float(c.get("short_k"), 50)
     short_d = safe_float(c.get("short_d"), 50)
 
-    # A-grade
     if (
         score >= 230
         and value >= 200_000_000
@@ -584,7 +570,6 @@ def calculate_alert_grade(c):
     ):
         return "A", "🔥 A급"
 
-    # B-grade
     if (
         score >= 220
         and value >= 150_000_000
@@ -618,40 +603,28 @@ def pass_confirmed_filter(c):
 
     if score < 210:
         return False
-
     if value < MIN_4H_TRADE_VALUE:
         return False
-
     if volume_ratio < 1.5:
         return False
-
     if not (20 <= short_k <= 70):
         return False
-
     if short_d > 60:
         return False
-
     if mid_k > 70:
         return False
-
     if not (-5.0 <= ma20_dev <= 5.0):
         return False
-
     if not (-4.0 <= recent_3bar <= 6.0):
         return False
-
     if close_position < 0.60:
         return False
-
     if upper_wick_ratio > 0.35:
         return False
-
     if not (MIN_CANDLE_CHANGE <= candle_change <= 4.0):
         return False
-
     if not ma5_up:
         return False
-
     if not bullish_ok:
         return False
 
@@ -692,11 +665,7 @@ def make_candidate_from_row(market, row, bullish_ok, analysis_info):
 
 
 def grade_order_value(grade):
-    return {
-        "A": 0,
-        "B": 1,
-        "WATCH": 2,
-    }.get(grade, 9)
+    return {"A": 0, "B": 1, "WATCH": 2}.get(grade, 9)
 
 
 def sort_candidates(candidates):
@@ -715,10 +684,7 @@ def sort_candidates(candidates):
 # SIGNAL STATE
 # =========================================================
 def default_signal_state():
-    return {
-        "active": [],
-        "closed": [],
-    }
+    return {"active": [], "closed": []}
 
 
 def load_signal_state():
@@ -732,19 +698,14 @@ def load_signal_state():
         with open(SIGNAL_STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # 구버전 리스트 형태 호환
         if isinstance(data, list):
-            return {
-                "active": data,
-                "closed": [],
-            }
+            return {"active": data, "closed": []}
 
         if not isinstance(data, dict):
             return default_signal_state()
 
         data.setdefault("active", [])
         data.setdefault("closed", [])
-
         return data
 
     except Exception as e:
@@ -767,12 +728,9 @@ def save_signal_state(state):
 def parse_signal_time(signal):
     for key in ["alert_time_utc", "created_at_utc", "signal_time_utc"]:
         value = signal.get(key)
-        if value:
-            dt = parse_dt(value)
-            if dt:
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt
+        dt = parse_dt(value)
+        if dt:
+            return dt
     return now_utc()
 
 
@@ -783,7 +741,6 @@ def is_duplicate_or_cooldown(state, market):
         if s.get("market") == market and s.get("status", "active") == "active":
             return True
 
-    # 최근 closed 포함 쿨다운
     all_signals = state.get("active", []) + state.get("closed", [])
 
     for s in all_signals:
@@ -808,7 +765,6 @@ def add_new_signals_to_state(state, candidates):
     for c in candidates:
         grade = c.get("alert_grade")
 
-        # V3.7 핵심: A/B만 저장, WATCH 제외
         if grade not in ALLOWED_ALERT_GRADES:
             continue
 
@@ -886,7 +842,6 @@ def check_active_signals(state):
 
         created = parse_signal_time(s)
         hold_hours = (current - created).total_seconds() / 3600.0
-
         return_rate = pct(current_price, entry_price)
 
         event_type = None
@@ -928,7 +883,6 @@ def check_active_signals(state):
             still_active.append(s)
 
     state["active"] = still_active
-
     return closed_events
 
 
@@ -1062,7 +1016,7 @@ def scan_markets():
     print(f"Scan markets: {len(markets)}")
     print(build_analysis_info_text(analysis_info))
 
-    for idx, market in enumerate(markets, 1):
+    for market in markets:
         try:
             df = fetch_4h_candles(market, ALERT_CANDLE_COUNT)
 
@@ -1074,7 +1028,6 @@ def scan_markets():
             if df.empty or len(df) < 130:
                 continue
 
-            # 기준봉 정보는 첫 정상 종목 기준으로도 보정
             if not analysis_info:
                 analysis_info = get_analysis_candle_info_from_df(df)
 
@@ -1089,7 +1042,6 @@ def scan_markets():
 
             filter_pass_count += 1
 
-            # V3.7: WATCH는 최종 알림/추적 제외
             if c.get("alert_grade") not in ALLOWED_ALERT_GRADES:
                 watch_excluded_count += 1
                 continue
@@ -1152,9 +1104,7 @@ def format_candidate_line(idx, c):
         f"K/D {short_k:.1f}/{short_d:.1f} / 중기K {mid_k:.1f} / "
         f"MA20 {ma20_dev:+.2f}%"
     )
-    lines.append(
-        f"종가위치 {close_position:.2f} / 윗꼬리 {upper_wick_ratio:.2f}"
-    )
+    lines.append(f"종가위치 {close_position:.2f} / 윗꼬리 {upper_wick_ratio:.2f}")
 
     return "\n".join(lines)
 
@@ -1252,9 +1202,9 @@ def main():
     closed_events = check_active_signals(state)
 
     if closed_events:
-        msg = build_closed_events_message(closed_events)
-        print(msg)
-        send_telegram_message(msg)
+        closed_msg = build_closed_events_message(closed_events)
+        print(closed_msg)
+        send_telegram_message(closed_msg)
 
     # 2) 현재 추적 중 신호 요약 생성
     active_summary = build_active_signals_summary(state)
@@ -1262,18 +1212,19 @@ def main():
     # 3) 신규 후보 스캔
     candidates, meta = scan_markets()
 
-    # 4) 텔레그램 알림
-if candidates:
-    added = add_new_signals_to_state(state, candidates)
-    print(f"Added new active signals: {added}")
+    # 4) 후보가 있는 경우
+    if candidates:
+        added = add_new_signals_to_state(state, candidates)
+        print(f"Added new active signals: {added}")
 
-    save_signal_state(state)
+        # 텔레그램 전송 전에 먼저 저장
+        save_signal_state(state)
 
-    msg = build_telegram_message(candidates, meta, active_summary=active_summary)
-    print(msg)
-    send_telegram_message(msg)
+        msg = build_telegram_message(candidates, meta, active_summary=active_summary)
+        print(msg)
+        send_telegram_message(msg)
 
-
+    # 5) 후보가 없는 경우
     else:
         if SEND_EMPTY_ALERT:
             msg = build_empty_message(meta, active_summary=active_summary)
@@ -1282,7 +1233,9 @@ if candidates:
         else:
             print("No candidates and SEND_EMPTY_ALERT=false. Telegram skipped.")
 
-    # 5) 상태 저장
+        save_signal_state(state)
+
+    # 6) 최종 저장 보장
     save_signal_state(state)
 
     print("Telegram Coin Alert Bot V3.7 finished")
@@ -1292,7 +1245,10 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        error_msg = f"🚨 Telegram Coin Alert Bot V3.7 error\n\n{type(e).__name__}: {e}"
+        error_msg = (
+            "🚨 Telegram Coin Alert Bot V3.7 error\n\n"
+            f"{type(e).__name__}: {e}"
+        )
         print(error_msg)
         send_telegram_message(error_msg)
         raise
