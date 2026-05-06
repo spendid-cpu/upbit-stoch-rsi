@@ -1,0 +1,66 @@
+name: Backtest Coin Strategy
+
+on:
+  workflow_dispatch:
+    inputs:
+      backtest_days:
+        description: "Backtest period in days"
+        required: true
+        default: "60"
+      max_markets:
+        description: "Max KRW markets to test. Use 999 for all."
+        required: true
+        default: "999"
+      send_telegram:
+        description: "Send result to Telegram? true/false"
+        required: true
+        default: "true"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests
+
+      - name: Run backtest
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          BACKTEST_DAYS: ${{ github.event.inputs.backtest_days }}
+          BACKTEST_MAX_MARKETS: ${{ github.event.inputs.max_markets }}
+          SEND_TELEGRAM_BACKTEST: ${{ github.event.inputs.send_telegram }}
+
+          REQUEST_DELAY: "0.09"
+
+          TAKE_PROFIT_RATE: "0.05"
+          STOP_LOSS_RATE: "0.04"
+          MAX_HOLD_HOURS: "48"
+          SIGNAL_COOLDOWN_HOURS: "12"
+
+          MIN_4H_TRADE_VALUE: "150000000"
+          MIN_CANDLE_CHANGE: "0.7"
+
+          RESULT_CSV_FILE: "backtest_results.csv"
+          SUMMARY_JSON_FILE: "backtest_summary.json"
+        run: python backtest.py
+
+      - name: Upload backtest artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-results
+          path: |
+            backtest_results.csv
+            backtest_summary.json
