@@ -72,14 +72,25 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
+          echo "===== Git status before add ====="
+          git status
+
           if [ -f active_signals.json ]; then
-            git status
+            echo "===== active_signals.json exists ====="
             git add active_signals.json
+
+            echo "===== Git diff cached ====="
+            git diff --cached -- active_signals.json || true
 
             if git diff --cached --quiet; then
               echo "No active_signals.json changes to commit."
             else
               git commit -m "update active signals"
+
+              echo "===== Pull latest before push ====="
+              git pull --rebase origin main
+
+              echo "===== Push active_signals.json ====="
               git push origin main
             fi
           else
