@@ -1,14 +1,17 @@
 # alert_bot.py
-# Telegram Coin Alert Bot V3.5
+# Telegram Coin Alert Bot V3.6
 # - Confirmed 4H close scanner only
 # - Preliminary alert disabled
 # - Momentum/chasing filter disabled
 # - Overheated coins excluded
+# - Absolute 4H trading value filter added
+# - Minimum candle rise filter strengthened
 # - BTC 4H filter
 # - Candle quality filter
 # - MA5 slope filter
 # - Telegram A/B/WATCH grading
 # - Active signal tracking: TP +5%, SL -4%, Expire 48h
+# - Active signals summary included in every Telegram alert
 
 import os
 import time
@@ -48,6 +51,10 @@ TAKE_PROFIT_RATE = float(os.getenv("TAKE_PROFIT_RATE", "0.05"))   # +5%
 STOP_LOSS_RATE = float(os.getenv("STOP_LOSS_RATE", "0.04"))       # -4%
 MAX_HOLD_HOURS = float(os.getenv("MAX_HOLD_HOURS", "48"))         # 48h
 SIGNAL_COOLDOWN_HOURS = float(os.getenv("SIGNAL_COOLDOWN_HOURS", "12"))
+
+# V3.6 strengthened filters
+MIN_4H_TRADE_VALUE = float(os.getenv("MIN_4H_TRADE_VALUE", "150000000"))  # 1.5억
+MIN_CANDLE_CHANGE = float(os.getenv("MIN_CANDLE_CHANGE", "0.7"))          # +0.7%
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -121,6 +128,11 @@ def format_price(price):
     if price < 100:
         return f"{price:.3f}"
     return f"{price:.0f}"
+
+
+def format_eok(value):
+    value = safe_float(value)
+    return value / 100_000_000
 
 
 # =========================
@@ -426,6 +438,116 @@ def build_tracking_event_message(events):
     return "\n".join(lines)
 
 
+def build_active_signals_summary(state, max_items=10):
+    """
+    아직 TP/SL/만료되지 않은 active 신호들을
+    매 알림마다 요약해서 보여준다.
+    """
+
+    active = [
+        sig for sig in state.get("active", [])
+        if sig.get("status", "active") == "active"
+    ]
+
+    if not active:
+        return ""
+
+    now = now_kst()
+
+    need_price_markets = []
+    for sig in active:
+        if safe_float(sig.get("last_price"), 0) <= 0 and sig.get("market"):
+            need_price_markets.append(sig.get("market"))
+
+    price_map = {}
+    if need_price_markets:
+        price_map = get_current_price_map(need_price_markets)
+
+    rows = []
+
+    for sig in active:
+        market = sig.get("market", "UNKNOWN")
+        entry_price = safe_float(sig.get("entry_price"), 0)
+        tp_price = safe_float(sig.get("tp_price"), entry_price * (1 + TAKE_PROFIT_RATE))
+        sl_price = safe_float(sig.get("sl_price"), entry_price * (1 - STOP_LOSS_RATE))
+
+        current_price = safe_float(sig.get("last_price"), 0)
+        if current_price <= 0:
+            current_price = safe_float(price_map.get(market), 0)
+
+        if entry_price <= 0 or current_price <= 0:
+            continue
+
+        return_rate = percent(current_price, entry_price)
+
+        alert_dt = parse_datetime(sig.get("alert_time_iso"))
+
+        hold_hours = 0.0
+        if alert_dt is not None:
+            hold_hours = (now - alert_dt).total_seconds() / 3600.0
+
+        # 혹시 만료 시간이 지났는데 active에 남아있으면 표시 제외
+        if hold_hours > MAX_HOLD_HOURS:
+            continue
+
+        grade_label = sig.get("grade_label", "")
+        signal_type_label = sig.get("signal_type_label", "")
+        alert_time = sig.get("alert_time", "")
+
+        if return_rate >= 3.0:
+            state_icon = "🟢"
+        elif return_rate >= 0:
+            state_icon = "⚪"
+        elif return_rate > -2.0:
+            state_icon = "🟡"
+        else:
+            state_icon = "🔴"
+
+        tp_gap = percent(tp_price, current_price)
+        sl_gap = percent(sl_price, current_price)
+
+        rows.append({
+            "market": market,
+            "entry_price": entry_price,
+            "current_price": current_price,
+            "return_rate": return_rate,
+            "hold_hours": hold_hours,
+            "tp_price": tp_price,
+            "sl_price": sl_price,
+            "tp_gap": tp_gap,
+            "sl_gap": sl_gap,
+            "grade_label": grade_label,
+            "signal_type_label": signal_type_label,
+            "alert_time": alert_time,
+            "state_icon": state_icon
+        })
+
+    if not rows:
+        return ""
+
+    rows.sort(key=lambda x: x["return_rate"], reverse=True)
+    rows = rows[:max_items]
+
+    lines = []
+    lines.append("📊 48시간 추적 중 신호")
+    lines.append(f"현재시간: {format_now()}")
+    lines.append("")
+
+    for i, r in enumerate(rows, start=1):
+        lines.append(
+            f"{i}. {r['market']} {r['state_icon']} {r['grade_label']} {r['signal_type_label']}\n"
+            f"추천시간: {r['alert_time']}\n"
+            f"추천가: {format_price(r['entry_price'])} / 현재가: {format_price(r['current_price'])}\n"
+            f"현재수익률: {r['return_rate']:+.2f}% / 경과: {r['hold_hours']:.1f}시간\n"
+            f"TP {format_price(r['tp_price'])}까지 {r['tp_gap']:+.2f}% / "
+            f"SL {format_price(r['sl_price'])}까지 {r['sl_gap']:+.2f}%\n"
+        )
+
+    lines.append("※ 위 목록은 아직 익절/손절/만료되지 않은 48시간 추적 대상입니다.")
+
+    return "\n".join(lines)
+
+
 def add_new_signals_to_state(state, candidates, alert_mode):
     state.setdefault("active", [])
     state.setdefault("closed", [])
@@ -481,6 +603,7 @@ def add_new_signals_to_state(state, candidates, alert_mode):
             "signal_type_label": "🟢 확정전환",
 
             "volume_ratio": safe_float(c.get("volume_ratio"), 0),
+            "value": safe_float(c.get("value"), 0),
             "short_k": safe_float(c.get("short_k"), 0),
             "short_d": safe_float(c.get("short_d"), 0),
             "mid_k": safe_float(c.get("mid_k"), 0),
@@ -639,7 +762,7 @@ def prepare_indicators(df):
 
 def detect_alert_mode():
     """
-    V3.5 확정 전용 운영.
+    V3.6 확정 전용 운영.
     예비 알림 없이 모든 실행을 confirmed로 처리한다.
     """
     return "confirmed"
@@ -700,7 +823,7 @@ def get_btc_filter(alert_mode):
             "btc_3bar": btc_3bar
         }
 
-    # V3.5 확정 전용 BTC 필터
+    # V3.6 확정 전용 BTC 필터
     passed = close > ma20 and btc_3bar >= -3.0
     reason = "BTC close > MA20" if passed else "BTC confirmed filter fail"
 
@@ -721,6 +844,7 @@ def calculate_base_score(metrics):
     score = 0
 
     volume_ratio = metrics["volume_ratio"]
+    value = metrics["value"]
     short_k = metrics["short_k"]
     short_d = metrics["short_d"]
     mid_k = metrics["mid_k"]
@@ -741,6 +865,14 @@ def calculate_base_score(metrics):
         score += 40
     elif volume_ratio >= 1.3:
         score += 30
+
+    # 절대 4H 거래대금
+    if value >= 500_000_000:
+        score += 25
+    elif value >= 300_000_000:
+        score += 15
+    elif value >= MIN_4H_TRADE_VALUE:
+        score += 8
 
     # 단기 Stoch RSI
     if 20 <= short_k <= 55 and short_d <= 50:
@@ -793,7 +925,7 @@ def calculate_base_score(metrics):
     # 캔들 상승률
     if 1.0 <= candle_change <= 3.5:
         score += 25
-    elif 0.2 <= candle_change <= 4.0:
+    elif MIN_CANDLE_CHANGE <= candle_change <= 4.0:
         score += 15
 
     # MA5 상승
@@ -898,21 +1030,27 @@ def calculate_candidate_metrics(market, df, alert_mode):
 
 
 # =========================
-# 11. V3.5 CONFIRMED FILTER
+# 11. V3.6 CONFIRMED FILTER
 # =========================
 
 def pass_confirmed_filter(c):
     """
-    V3.5 확정 전용 필터.
-    너무 오른 종목, 과열 종목, 윗꼬리 긴 종목을 배제한다.
+    V3.6 확정 전용 필터.
+    V3.5에서 약한 박스권/저유동성 후보를 줄이기 위해 보강.
+    - 절대 4H 거래대금 필터 추가
+    - 캔들 상승률 최소값 상향
     """
 
     # 기본 점수
     if c["score"] < 210:
         return False
 
-    # 거래대금 증가
+    # 거래대금 증가율
     if c["volume_ratio"] < 1.5:
+        return False
+
+    # V3.6 추가: 절대 4H 거래대금 필터
+    if c["value"] < MIN_4H_TRADE_VALUE:
         return False
 
     # Stoch RSI 과열 배제
@@ -943,10 +1081,11 @@ def pass_confirmed_filter(c):
     if c["upper_wick_ratio"] > 0.35:
         return False
 
-    # 현재 캔들 너무 약하거나 너무 오른 것 배제
-    if c["candle_change"] < 0.2:
+    # V3.6 변경: 현재 캔들 최소 상승률 상향
+    if c["candle_change"] < MIN_CANDLE_CHANGE:
         return False
 
+    # 너무 오른 것 배제
     if c["candle_change"] > 4.0:
         return False
 
@@ -968,6 +1107,7 @@ def pass_confirmed_filter(c):
 def calculate_alert_grade(candidate):
     score = safe_float(candidate.get("score"), 0)
     volume_ratio = safe_float(candidate.get("volume_ratio"), 0)
+    value = safe_float(candidate.get("value"), 0)
     short_k = safe_float(candidate.get("short_k"), 100)
     short_d = safe_float(candidate.get("short_d"), 100)
     mid_k = safe_float(candidate.get("mid_k"), 100)
@@ -999,13 +1139,23 @@ def calculate_alert_grade(candidate):
     elif upper_wick_ratio > 0.35:
         quality_score -= 20
 
-    # 거래대금
+    # 거래대금 비율
     if volume_ratio >= 2.0:
         quality_score += 25
     elif volume_ratio >= 1.7:
         quality_score += 20
     elif volume_ratio >= 1.5:
         quality_score += 10
+
+    # V3.6 추가: 절대 4H 거래대금 품질 점수
+    if value >= 500_000_000:
+        quality_score += 20
+    elif value >= 300_000_000:
+        quality_score += 12
+    elif value >= MIN_4H_TRADE_VALUE:
+        quality_score += 5
+    else:
+        quality_score -= 20
 
     # MA20 이격
     if -2.0 <= ma20_dev <= 2.0:
@@ -1018,7 +1168,7 @@ def calculate_alert_grade(candidate):
     # 캔들 상승률
     if 1.0 <= candle_change <= 3.5:
         quality_score += 20
-    elif 0.3 <= candle_change < 1.0:
+    elif MIN_CANDLE_CHANGE <= candle_change < 1.0:
         quality_score += 8
     elif candle_change > 4.0:
         quality_score -= 20
@@ -1048,6 +1198,7 @@ def calculate_alert_grade(candidate):
     is_a_grade = (
         score >= 230
         and volume_ratio >= 1.70
+        and value >= 200_000_000
         and close_position >= 0.85
         and upper_wick_ratio <= 0.15
         and -2.0 <= ma20_dev <= 2.0
@@ -1061,10 +1212,11 @@ def calculate_alert_grade(candidate):
     is_b_grade = (
         score >= 220
         and volume_ratio >= 1.50
+        and value >= MIN_4H_TRADE_VALUE
         and close_position >= 0.70
         and upper_wick_ratio <= 0.30
         and -3.0 <= ma20_dev <= 3.0
-        and 0.2 <= candle_change <= 4.0
+        and MIN_CANDLE_CHANGE <= candle_change <= 4.0
         and recent_3bar <= 6.0
     )
 
@@ -1105,6 +1257,7 @@ def apply_alert_grades(candidates):
             grade_order.get(x.get("alert_grade", "WATCH"), 9),
             -safe_float(x.get("alert_score"), 0),
             -safe_float(x.get("score"), 0),
+            -safe_float(x.get("value"), 0),
             -safe_float(x.get("volume_ratio"), 0),
             -safe_float(x.get("close_position"), 0),
             safe_float(x.get("upper_wick_ratio"), 1),
@@ -1124,6 +1277,9 @@ def format_candidate_line(index, candidate):
 
     score = safe_float(candidate.get("score"), 0)
     volume_ratio = safe_float(candidate.get("volume_ratio"), 0)
+    value = safe_float(candidate.get("value"), 0)
+    value_eok = format_eok(value)
+
     short_k = safe_float(candidate.get("short_k"), 0)
     short_d = safe_float(candidate.get("short_d"), 0)
     mid_k = safe_float(candidate.get("mid_k"), 0)
@@ -1144,14 +1300,14 @@ def format_candidate_line(index, candidate):
     return (
         f"{index}. {market} {grade_label} 🟢 확정전환\n"
         f"점수 {score:.0f} / 보정 {alert_score:.0f} / 품질 {quality_score:+.0f}\n"
-        f"거래대금 x{volume_ratio:.2f} / K {short_k:.2f} D {short_d:.2f} / 중기K {mid_k:.2f}\n"
+        f"거래대금 x{volume_ratio:.2f} / 4H {value_eok:.1f}억 / K {short_k:.2f} D {short_d:.2f} / 중기K {mid_k:.2f}\n"
         f"MA20 {ma20_dev:.2f}% / 3봉 {recent_3bar:.2f}% / 종가위치 {close_position:.2f} / 윗꼬리 {upper_wick_ratio:.2f}\n"
         f"캔들 {candle_change:.2f}% / 가격 {format_price(price)}\n"
         f"전략기준 TP {format_price(tp_price)} / SL {format_price(sl_price)}\n"
     )
 
 
-def build_telegram_message(candidates, alert_mode, scan_count, btc_info):
+def build_telegram_message(candidates, alert_mode, scan_count, btc_info, active_summary=""):
     candidates = apply_alert_grades(candidates)
 
     title = "🟢 4H 마감 후 상승전환 확정 후보"
@@ -1199,14 +1355,20 @@ def build_telegram_message(candidates, alert_mode, scan_count, btc_info):
             lines.append(format_candidate_line(index, candidate))
             index += 1
 
+    if active_summary:
+        lines.append("")
+        lines.append(active_summary)
+        lines.append("")
+
     lines.append("※ 자동매매 아님. 진입 전 호가/거래대금/BTC 상태 확인 필요.")
     lines.append(f"※ 전략 추적 기준: 익절 +{TAKE_PROFIT_RATE * 100:.1f}% / 손절 -{STOP_LOSS_RATE * 100:.1f}% / 만료 {MAX_HOLD_HOURS:.0f}시간")
-    lines.append("※ V3.5는 확정봉 기준이며, 과열/급등/윗꼬리 종목은 배제합니다.")
+    lines.append(f"※ V3.6 기준: 4H 거래대금 {MIN_4H_TRADE_VALUE / 100_000_000:.1f}억 이상 / 캔들 +{MIN_CANDLE_CHANGE:.1f}% 이상.")
+    lines.append("※ 확정봉 기준이며, 과열/급등/윗꼬리 종목은 배제합니다.")
 
     return "\n".join(lines)
 
 
-def build_empty_message(alert_mode, scan_count, btc_info):
+def build_empty_message(alert_mode, scan_count, btc_info, active_summary=""):
     title = "🟢 4H 마감 후 상승전환 확정 후보"
 
     lines = []
@@ -1230,7 +1392,14 @@ def build_empty_message(alert_mode, scan_count, btc_info):
 
     lines.append("조건 만족 종목 없음")
     lines.append("※ 현재 조건에서는 무리한 매수보다 관망이 우선입니다.")
-    lines.append("※ V3.5는 확정봉 기준이라 신호 수가 적을 수 있습니다.")
+
+    if active_summary:
+        lines.append("")
+        lines.append(active_summary)
+        lines.append("")
+
+    lines.append("※ V3.6는 확정봉 기준이라 신호 수가 적을 수 있습니다.")
+    lines.append(f"※ 필터: 4H 거래대금 {MIN_4H_TRADE_VALUE / 100_000_000:.1f}억 이상 / 캔들 +{MIN_CANDLE_CHANGE:.1f}% 이상.")
 
     return "\n".join(lines)
 
@@ -1302,7 +1471,7 @@ def scan_markets(alert_mode, btc_info):
 
 def main():
     print("========================================")
-    print("Telegram Coin Alert Bot V3.5 started")
+    print("Telegram Coin Alert Bot V3.6 started")
     print(f"Time: {format_now()}")
     print("Mode: CONFIRMED ONLY")
     print(f"Interval: {ALERT_INTERVAL}")
@@ -1312,6 +1481,8 @@ def main():
     print(f"Send empty alert: {SEND_EMPTY_ALERT}")
     print(f"Signal tracking: {ENABLE_SIGNAL_TRACKING}")
     print(f"TP: {TAKE_PROFIT_RATE * 100:.1f}% / SL: {STOP_LOSS_RATE * 100:.1f}% / Expire: {MAX_HOLD_HOURS:.0f}h")
+    print(f"Min 4H value: {MIN_4H_TRADE_VALUE:,.0f}")
+    print(f"Min candle change: {MIN_CANDLE_CHANGE:.2f}%")
     print("========================================")
 
     # 1) 기존 추천 종목 TP/SL/만료 체크
@@ -1329,7 +1500,12 @@ def main():
             save_signal_state(state)
             print(f"Signal state updated after tracking. Active: {len(state.get('active', []))}")
 
-    # 2) 신규 후보 스캔
+    # 2) 현재 추적 중인 종목 요약
+    active_summary = ""
+    if ENABLE_SIGNAL_TRACKING:
+        active_summary = build_active_signals_summary(state)
+
+    # 3) 신규 후보 스캔
     alert_mode = detect_alert_mode()
     print(f"Alert mode: {alert_mode}")
 
@@ -1341,13 +1517,14 @@ def main():
     print(f"Scan count: {scan_count}")
     print(f"Candidate count: {len(candidates)}")
 
-    # 3) 신규 후보 알림 및 active 저장
+    # 4) 신규 후보 알림 및 active 저장
     if candidates:
         message = build_telegram_message(
             candidates=candidates,
             alert_mode=alert_mode,
             scan_count=scan_count,
-            btc_info=btc_info
+            btc_info=btc_info,
+            active_summary=active_summary
         )
 
         print(message)
@@ -1367,7 +1544,8 @@ def main():
             message = build_empty_message(
                 alert_mode=alert_mode,
                 scan_count=scan_count,
-                btc_info=btc_info
+                btc_info=btc_info,
+                active_summary=active_summary
             )
 
             print(message)
@@ -1375,7 +1553,7 @@ def main():
         else:
             print("No candidates and SEND_EMPTY_ALERT=false. Telegram message skipped.")
 
-    print("Telegram Coin Alert Bot V3.5 finished")
+    print("Telegram Coin Alert Bot V3.6 finished")
 
 
 if __name__ == "__main__":
