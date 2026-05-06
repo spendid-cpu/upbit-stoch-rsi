@@ -8,26 +8,29 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 
 # =========================================================
-# Backtest V1.0 for Telegram Coin Alert Strategy V3.6
-# - 4H confirmed candle only
-# - Overheated coin exclusion
-# - Absolute 4H trade value filter
-# - TP +5%, SL -4%, Max hold 48h
-# - A/B/WATCH grade performance summary
+# Backtest V1.1 for Telegram Coin Alert Strategy V3.6
+# ---------------------------------------------------------
+# 추가 기능:
+# - 실제 알림처럼 동일 4H 시간대별 상위 MAX_ALERT_COUNT만 반영
+# - A+B / A only / B only / WATCH 성과 별도 계산
+# - TP/SL 조합 비교
+# - CSV / JSON / Telegram 요약 출력
 # =========================================================
+
+UPBIT_BASE_URL = "https://api.upbit.com/v1"
 
 # -----------------------------
 # ENV CONFIG
 # -----------------------------
-UPBIT_BASE_URL = "https://api.upbit.com/v1"
-
 BACKTEST_DAYS = int(os.getenv("BACKTEST_DAYS", "60"))
-BACKTEST_CANDLE_INTERVAL = os.getenv("BACKTEST_CANDLE_INTERVAL", "minute240")
 BACKTEST_MAX_MARKETS = int(os.getenv("BACKTEST_MAX_MARKETS", "999"))
 REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0.09"))
 
+MAX_ALERT_COUNT = int(os.getenv("MAX_ALERT_COUNT", "10"))
+
 TAKE_PROFIT_RATE = float(os.getenv("TAKE_PROFIT_RATE", "0.05"))
 STOP_LOSS_RATE = float(os.getenv("STOP_LOSS_RATE", "0.04"))
+
 MAX_HOLD_HOURS = int(os.getenv("MAX_HOLD_HOURS", "48"))
 SIGNAL_COOLDOWN_HOURS = int(os.getenv("SIGNAL_COOLDOWN_HOURS", "12"))
 
@@ -38,37 +41,31 @@ SEND_TELEGRAM_BACKTEST = os.getenv("SEND_TELEGRAM_BACKTEST", "false").strip().lo
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-RESULT_CSV_FILE = os.getenv("RESULT_CSV_FILE", "backtest_results.csv")
+RESULT_RAW_CSV_FILE = os.getenv("RESULT_RAW_CSV_FILE", "backtest_raw_results.csv")
+RESULT_SELECTED_CSV_FILE = os.getenv("RESULT_SELECTED_CSV_FILE", "backtest_selected_results.csv")
 SUMMARY_JSON_FILE = os.getenv("SUMMARY_JSON_FILE", "backtest_summary.json")
 
-# 4H candles per day = 6
+# TP/SL 비교 조합
+# 형식: "0.04:0.04,0.045:0.04,0.05:0.04,0.04:0.035"
+TP_SL_SETS_TEXT = os.getenv(
+    "TP_SL_SETS",
+    "0.04:0.04,0.045:0.04,0.05:0.04,0.04:0.035"
+)
+
 CANDLES_PER_DAY = 6
 WARMUP_CANDLES = 120
 HOLD_CANDLES = int(MAX_HOLD_HOURS / 4)
-NEED_CANDLES = BACKTEST_DAYS * CANDLES_PER_DAY + WARMUP_CANDLES + HOLD_CANDLES + 20
+
+NEED_CANDLES = BACKTEST_DAYS * CANDLES_PER_DAY + WARMUP_CANDLES + HOLD_CANDLES + 30
 
 
 # -----------------------------
-# TIME UTILS
+# TIME / SAFE UTILS
 # -----------------------------
 def now_kst():
     return datetime.now(timezone.utc) + timedelta(hours=9)
 
 
-def parse_utc_datetime(value):
-    # Upbit returns e.g. "2026-05-06T00:00:00"
-    return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
-
-
-def utc_to_kst_text(dt):
-    if isinstance(dt, str):
-        dt = parse_utc_datetime(dt)
-    return (dt + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S KST")
-
-
-# -----------------------------
-# SAFE UTILS
-# -----------------------------
 def safe_float(value, default=0.0):
     try:
         if value is None:
@@ -86,6 +83,54 @@ def pct(a, b):
     return (a / b - 1.0) * 100.0
 
 
+def to_kst_text(dt):
+    if isinstance(dt, pd.Timestamp):
+        dt = dt.to_pydatetime()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (dt + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S KST")
+
+
+def parse_tp_sl_sets(text):
+    combos = []
+
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+
+        try:
+            tp_text, sl_text = part.split(":")
+            tp = float(tp_text.strip())
+            sl = float(sl_text.strip())
+            combos.append((tp, sl))
+        except Exception:
+            continue
+
+    main_combo = (TAKE_PROFIT_RATE, STOP_LOSS_RATE)
+
+    if main_combo not in combos:
+        combos.insert(0, main_combo)
+
+    # 중복 제거
+    unique = []
+    seen = set()
+    for tp, sl in combos:
+        key = f"{tp:.4f}:{sl:.4f}"
+        if key not in seen:
+            unique.append((tp, sl))
+            seen.add(key)
+
+    return unique
+
+
+TP_SL_COMBOS = parse_tp_sl_sets(TP_SL_SETS_TEXT)
+
+
+def combo_key(tp, sl):
+    return f"TP{tp * 100:.1f}_SL{sl * 100:.1f}"
+
+
 # -----------------------------
 # TELEGRAM
 # -----------------------------
@@ -95,13 +140,11 @@ def send_telegram_message(text):
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
-    chunks = []
     max_len = 3900
-    for i in range(0, len(text), max_len):
-        chunks.append(text[i:i + max_len])
 
     ok = True
+    chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)]
+
     for chunk in chunks:
         try:
             res = requests.post(
@@ -109,9 +152,9 @@ def send_telegram_message(text):
                 json={
                     "chat_id": TELEGRAM_CHAT_ID,
                     "text": chunk,
-                    "disable_web_page_preview": True
+                    "disable_web_page_preview": True,
                 },
-                timeout=15
+                timeout=15,
             )
             if res.status_code != 200:
                 print(f"Telegram send failed: {res.status_code} {res.text}")
@@ -120,6 +163,7 @@ def send_telegram_message(text):
         except Exception as e:
             print(f"Telegram exception: {e}")
             ok = False
+
     return ok
 
 
@@ -128,16 +172,20 @@ def send_telegram_message(text):
 # -----------------------------
 def upbit_get(path, params=None, retry=3):
     url = f"{UPBIT_BASE_URL}{path}"
+
     for attempt in range(retry):
         try:
             res = requests.get(url, params=params, timeout=15)
             if res.status_code == 200:
                 return res.json()
+
             print(f"Upbit API error {res.status_code}: {res.text[:200]}")
             time.sleep(0.5 + attempt)
+
         except Exception as e:
             print(f"Upbit API exception: {e}")
             time.sleep(0.5 + attempt)
+
     return None
 
 
@@ -147,34 +195,37 @@ def get_krw_markets():
         return []
 
     markets = []
+
     for item in data:
         market = item.get("market", "")
         if not market.startswith("KRW-"):
             continue
+
         if market in ["KRW-BTC", "KRW-USDT", "KRW-USDC"]:
             continue
+
         markets.append(market)
 
     markets = sorted(markets)
+
     if BACKTEST_MAX_MARKETS > 0:
         markets = markets[:BACKTEST_MAX_MARKETS]
+
     return markets
 
 
 def fetch_4h_candles(market, need_count=NEED_CANDLES):
-    """
-    Fetch 4H candles from Upbit using pagination.
-    Upbit returns newest first.
-    """
     all_rows = []
     to_value = None
 
     while len(all_rows) < need_count:
         count = min(200, need_count - len(all_rows))
+
         params = {
             "market": market,
-            "count": count
+            "count": count,
         }
+
         if to_value:
             params["to"] = to_value
 
@@ -205,18 +256,20 @@ def fetch_4h_candles(market, need_count=NEED_CANDLES):
     df["dt_utc"] = pd.to_datetime(df["candle_date_time_utc"], utc=True)
     df = df.sort_values("dt_utc").reset_index(drop=True)
 
-    rename_map = {
-        "opening_price": "open",
-        "high_price": "high",
-        "low_price": "low",
-        "trade_price": "close",
-        "candle_acc_trade_price": "value",
-        "candle_acc_trade_volume": "volume"
-    }
-    df = df.rename(columns=rename_map)
+    df = df.rename(
+        columns={
+            "opening_price": "open",
+            "high_price": "high",
+            "low_price": "low",
+            "trade_price": "close",
+            "candle_acc_trade_price": "value",
+            "candle_acc_trade_volume": "volume",
+        }
+    )
 
-    needed_cols = ["dt_utc", "open", "high", "low", "close", "value", "volume"]
-    for col in needed_cols:
+    required_cols = ["dt_utc", "open", "high", "low", "close", "value", "volume"]
+
+    for col in required_cols:
         if col not in df.columns:
             return pd.DataFrame()
 
@@ -224,7 +277,7 @@ def fetch_4h_candles(market, need_count=NEED_CANDLES):
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df.dropna(subset=["open", "high", "low", "close"])
-    return df[needed_cols].reset_index(drop=True)
+    return df[required_cols].reset_index(drop=True)
 
 
 # -----------------------------
@@ -240,6 +293,7 @@ def calc_rsi(series, period=14):
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
+
     return rsi.fillna(50)
 
 
@@ -254,12 +308,14 @@ def add_indicators(df):
 
     rsi_min = df["rsi"].rolling(14).min()
     rsi_max = df["rsi"].rolling(14).max()
+
     stoch_rsi = (df["rsi"] - rsi_min) / (rsi_max - rsi_min).replace(0, np.nan) * 100
     df["short_k"] = stoch_rsi.rolling(3).mean().fillna(50)
     df["short_d"] = df["short_k"].rolling(3).mean().fillna(50)
 
     low14 = df["low"].rolling(14).min()
     high14 = df["high"].rolling(14).max()
+
     mid_k = (df["close"] - low14) / (high14 - low14).replace(0, np.nan) * 100
     df["mid_k"] = mid_k.rolling(3).mean().fillna(50)
 
@@ -267,6 +323,7 @@ def add_indicators(df):
     df["volume_ratio"] = df["value"] / df["volume_avg20"].replace(0, np.nan)
 
     candle_range = (df["high"] - df["low"]).replace(0, np.nan)
+
     df["close_position"] = ((df["close"] - df["low"]) / candle_range).fillna(0.5)
     df["upper_wick_ratio"] = ((df["high"] - df["close"]) / candle_range).fillna(0.5)
 
@@ -282,23 +339,26 @@ def add_indicators(df):
 # -----------------------------
 def build_btc_filter_map():
     btc = fetch_4h_candles("KRW-BTC", NEED_CANDLES)
+
     if btc.empty:
-        print("BTC candles empty. BTC filter will be treated as OK.")
+        print("BTC candles empty. BTC filter treated as OK.")
         return {}
 
     btc = add_indicators(btc)
+
     result = {}
 
     for _, row in btc.iterrows():
         dt = row["dt_utc"]
+
         candle_change = safe_float(row.get("candle_change"), 0.0)
         ma20_dev = safe_float(row.get("ma20_dev"), 0.0)
 
-        # 보수적 BTC 필터:
-        # BTC 4H가 급락 중이거나 MA20에서 크게 아래면 신규 신호 약화
         bullish_ok = True
+
         if candle_change <= -2.0:
             bullish_ok = False
+
         if ma20_dev <= -4.0:
             bullish_ok = False
 
@@ -314,7 +374,7 @@ def get_btc_ok_for_time(btc_map, dt):
 
 
 # -----------------------------
-# SCORING / FILTER / GRADE
+# SCORE / FILTER / GRADE
 # -----------------------------
 def calculate_base_score(c):
     score = 100
@@ -332,7 +392,6 @@ def calculate_base_score(c):
     ma5_up = bool(c.get("ma5_up"))
     bullish_ok = bool(c.get("bullish_ok", True))
 
-    # Relative volume
     if volume_ratio >= 3.0:
         score += 50
     elif volume_ratio >= 2.0:
@@ -344,7 +403,6 @@ def calculate_base_score(c):
     else:
         score -= 30
 
-    # Absolute 4H trade value
     if value >= 500_000_000:
         score += 30
     elif value >= 300_000_000:
@@ -354,7 +412,6 @@ def calculate_base_score(c):
     else:
         score -= 30
 
-    # Stoch RSI
     if 20 <= short_k <= 55 and short_d <= 55:
         score += 30
     elif 20 <= short_k <= 70 and short_d <= 60:
@@ -362,13 +419,11 @@ def calculate_base_score(c):
     elif short_k > 75 or short_d > 70:
         score -= 25
 
-    # Mid K
     if mid_k <= 55:
         score += 10
     elif mid_k > 70:
         score -= 15
 
-    # MA20 deviation
     if -2.0 <= ma20_dev <= 2.0:
         score += 25
     elif -5.0 <= ma20_dev <= 5.0:
@@ -376,7 +431,6 @@ def calculate_base_score(c):
     else:
         score -= 25
 
-    # Candle change
     if 1.0 <= candle_change <= 3.5:
         score += 25
     elif 0.7 <= candle_change <= 4.0:
@@ -384,7 +438,6 @@ def calculate_base_score(c):
     elif candle_change > 4.0:
         score -= 30
 
-    # Recent 3-bar
     if -1.0 <= recent_3bar <= 4.0:
         score += 15
     elif -4.0 <= recent_3bar <= 6.0:
@@ -392,7 +445,6 @@ def calculate_base_score(c):
     elif recent_3bar > 6.0:
         score -= 25
 
-    # Candle quality
     if close_position >= 0.85:
         score += 20
     elif close_position >= 0.60:
@@ -420,10 +472,47 @@ def calculate_base_score(c):
     return int(score)
 
 
+def calculate_alert_grade(c):
+    score = safe_float(c.get("score"))
+    value = safe_float(c.get("value"))
+    volume_ratio = safe_float(c.get("volume_ratio"))
+    close_position = safe_float(c.get("close_position"))
+    upper_wick_ratio = safe_float(c.get("upper_wick_ratio"))
+    ma20_dev = safe_float(c.get("ma20_dev"))
+    candle_change = safe_float(c.get("candle_change"))
+    short_k = safe_float(c.get("short_k"), 50)
+    short_d = safe_float(c.get("short_d"), 50)
+
+    if (
+        score >= 230
+        and value >= 200_000_000
+        and volume_ratio >= 1.70
+        and close_position >= 0.85
+        and upper_wick_ratio <= 0.15
+        and -2.0 <= ma20_dev <= 2.0
+        and 1.0 <= candle_change <= 3.5
+        and short_k <= 55
+        and short_d <= 55
+    ):
+        return "A", "🔥 A급"
+
+    if (
+        score >= 220
+        and value >= 150_000_000
+        and volume_ratio >= 1.50
+        and close_position >= 0.70
+        and upper_wick_ratio <= 0.30
+        and -3.0 <= ma20_dev <= 3.0
+        and 0.7 <= candle_change <= 4.0
+        and short_k <= 70
+        and short_d <= 60
+    ):
+        return "B", "🟡 B급"
+
+    return "WATCH", "👀 관찰"
+
+
 def pass_confirmed_filter(c):
-    """
-    V3.6 confirmed-only conservative filter.
-    """
     score = safe_float(c.get("score"))
     value = safe_float(c.get("value"))
     volume_ratio = safe_float(c.get("volume_ratio"))
@@ -441,7 +530,6 @@ def pass_confirmed_filter(c):
     if score < 210:
         return False
 
-    # V3.6 핵심 추가: 절대 4H 거래대금
     if value < MIN_4H_TRADE_VALUE:
         return False
 
@@ -469,7 +557,6 @@ def pass_confirmed_filter(c):
     if upper_wick_ratio > 0.35:
         return False
 
-    # V3.6 핵심 추가: 너무 약한 캔들 배제
     if not (MIN_CANDLE_CHANGE <= candle_change <= 4.0):
         return False
 
@@ -482,51 +569,6 @@ def pass_confirmed_filter(c):
     return True
 
 
-def calculate_alert_grade(c):
-    score = safe_float(c.get("score"))
-    value = safe_float(c.get("value"))
-    volume_ratio = safe_float(c.get("volume_ratio"))
-    close_position = safe_float(c.get("close_position"))
-    upper_wick_ratio = safe_float(c.get("upper_wick_ratio"))
-    ma20_dev = safe_float(c.get("ma20_dev"))
-    candle_change = safe_float(c.get("candle_change"))
-    short_k = safe_float(c.get("short_k"), 50)
-    short_d = safe_float(c.get("short_d"), 50)
-
-    # A-grade
-    if (
-        score >= 230
-        and value >= 200_000_000
-        and volume_ratio >= 1.70
-        and close_position >= 0.85
-        and upper_wick_ratio <= 0.15
-        and -2.0 <= ma20_dev <= 2.0
-        and 1.0 <= candle_change <= 3.5
-        and short_k <= 55
-        and short_d <= 55
-    ):
-        return "A", "🔥 A급"
-
-    # B-grade
-    if (
-        score >= 220
-        and value >= 150_000_000
-        and volume_ratio >= 1.50
-        and close_position >= 0.70
-        and upper_wick_ratio <= 0.30
-        and -3.0 <= ma20_dev <= 3.0
-        and 0.7 <= candle_change <= 4.0
-        and short_k <= 70
-        and short_d <= 60
-    ):
-        return "B", "🟡 B급"
-
-    return "WATCH", "👀 관찰"
-
-
-# -----------------------------
-# BACKTEST CORE
-# -----------------------------
 def make_candidate_from_row(market, row, btc_ok):
     c = {
         "market": market,
@@ -549,21 +591,22 @@ def make_candidate_from_row(market, row, btc_ok):
         "ma5_up": bool(row.get("ma5_up")),
         "bullish_ok": bool(btc_ok),
     }
+
     c["score"] = calculate_base_score(c)
+
     grade, grade_label = calculate_alert_grade(c)
     c["grade"] = grade
     c["grade_label"] = grade_label
+
     return c
 
 
-def evaluate_trade(df, signal_idx, entry_price):
-    """
-    Entry at signal candle close.
-    Future window: next 12 candles = 48h.
-    If both TP and SL are touched in same candle, conservatively count SL first.
-    """
-    tp_price = entry_price * (1.0 + TAKE_PROFIT_RATE)
-    sl_price = entry_price * (1.0 - STOP_LOSS_RATE)
+# -----------------------------
+# TRADE EVALUATION
+# -----------------------------
+def evaluate_trade(df, signal_idx, entry_price, tp_rate, sl_rate):
+    tp_price = entry_price * (1.0 + tp_rate)
+    sl_price = entry_price * (1.0 - sl_rate)
 
     future = df.iloc[signal_idx + 1: signal_idx + 1 + HOLD_CANDLES].copy()
 
@@ -585,49 +628,84 @@ def evaluate_trade(df, signal_idx, entry_price):
         hit_sl = low <= sl_price
 
         if hit_tp and hit_sl:
-            # Conservative assumption
+            # 같은 4H 봉 안에서 TP/SL 둘 다 닿으면 보수적으로 SL 처리
             result = "SL"
             exit_price = sl_price
             exit_dt = row["dt_utc"]
             break
-        elif hit_sl:
+
+        if hit_sl:
             result = "SL"
             exit_price = sl_price
             exit_dt = row["dt_utc"]
             break
-        elif hit_tp:
+
+        if hit_tp:
             result = "TP"
             exit_price = tp_price
             exit_dt = row["dt_utc"]
             break
 
-    final_return = pct(exit_price, entry_price)
-    max_up = pct(max_high, entry_price)
-    max_down = pct(min_low, entry_price)
-
     return {
         "result": result,
         "exit_price": exit_price,
         "exit_dt": exit_dt,
-        "final_return": final_return,
-        "max_up": max_up,
-        "max_down": max_down,
+        "final_return": pct(exit_price, entry_price),
+        "max_up": pct(max_high, entry_price),
+        "max_down": pct(min_low, entry_price),
         "tp_price": tp_price,
         "sl_price": sl_price,
     }
 
 
+def build_result_row(c, trade, tp_rate, sl_rate):
+    dt = c["dt_utc"]
+
+    return {
+        "market": c["market"],
+        "signal_time_utc": dt.isoformat(),
+        "signal_time_kst": to_kst_text(dt),
+        "entry_price": c["close"],
+        "exit_time_utc": trade["exit_dt"].isoformat(),
+        "exit_time_kst": to_kst_text(trade["exit_dt"]),
+        "exit_price": trade["exit_price"],
+        "result": trade["result"],
+        "final_return": trade["final_return"],
+        "max_up": trade["max_up"],
+        "max_down": trade["max_down"],
+        "tp_rate": tp_rate,
+        "sl_rate": sl_rate,
+        "tp_price": trade["tp_price"],
+        "sl_price": trade["sl_price"],
+        "grade": c["grade"],
+        "grade_label": c["grade_label"],
+        "score": c["score"],
+        "value": c["value"],
+        "volume_ratio": c["volume_ratio"],
+        "candle_change": c["candle_change"],
+        "recent_3bar": c["recent_3bar"],
+        "ma20_dev": c["ma20_dev"],
+        "short_k": c["short_k"],
+        "short_d": c["short_d"],
+        "mid_k": c["mid_k"],
+        "close_position": c["close_position"],
+        "upper_wick_ratio": c["upper_wick_ratio"],
+        "bullish_ok": c["bullish_ok"],
+    }
+
+
 def backtest_market(market, btc_map, start_dt):
     df = fetch_4h_candles(market, NEED_CANDLES)
+
     if df.empty or len(df) < WARMUP_CANDLES + HOLD_CANDLES + 20:
-        return []
+        return {combo_key(tp, sl): [] for tp, sl in TP_SL_COMBOS}
 
     df = add_indicators(df)
-    results = []
+
+    results_by_combo = {combo_key(tp, sl): [] for tp, sl in TP_SL_COMBOS}
 
     last_signal_dt = None
 
-    # Skip last HOLD_CANDLES because result cannot be fully known yet
     for i in range(WARMUP_CANDLES, len(df) - HOLD_CANDLES):
         row = df.iloc[i]
         dt = row["dt_utc"]
@@ -646,52 +724,71 @@ def backtest_market(market, btc_map, start_dt):
         if not pass_confirmed_filter(c):
             continue
 
-        trade = evaluate_trade(df, i, c["close"])
-        if trade is None:
-            continue
+        valid_any = False
 
-        last_signal_dt = dt
+        for tp_rate, sl_rate in TP_SL_COMBOS:
+            trade = evaluate_trade(df, i, c["close"], tp_rate, sl_rate)
 
-        result = {
-            "market": market,
-            "signal_time_utc": dt.isoformat(),
-            "signal_time_kst": utc_to_kst_text(dt.to_pydatetime() if hasattr(dt, "to_pydatetime") else dt),
-            "entry_price": c["close"],
-            "exit_time_utc": trade["exit_dt"].isoformat(),
-            "exit_time_kst": utc_to_kst_text(trade["exit_dt"].to_pydatetime() if hasattr(trade["exit_dt"], "to_pydatetime") else trade["exit_dt"]),
-            "exit_price": trade["exit_price"],
-            "result": trade["result"],
-            "final_return": trade["final_return"],
-            "max_up": trade["max_up"],
-            "max_down": trade["max_down"],
-            "tp_price": trade["tp_price"],
-            "sl_price": trade["sl_price"],
-            "grade": c["grade"],
-            "grade_label": c["grade_label"],
-            "score": c["score"],
-            "value": c["value"],
-            "volume_ratio": c["volume_ratio"],
-            "candle_change": c["candle_change"],
-            "recent_3bar": c["recent_3bar"],
-            "ma20_dev": c["ma20_dev"],
-            "short_k": c["short_k"],
-            "short_d": c["short_d"],
-            "mid_k": c["mid_k"],
-            "close_position": c["close_position"],
-            "upper_wick_ratio": c["upper_wick_ratio"],
-            "bullish_ok": c["bullish_ok"],
-        }
+            if trade is None:
+                continue
 
-        results.append(result)
+            key = combo_key(tp_rate, sl_rate)
+            results_by_combo[key].append(build_result_row(c, trade, tp_rate, sl_rate))
+            valid_any = True
 
-    return results
+        if valid_any:
+            last_signal_dt = dt
+
+    return results_by_combo
 
 
 # -----------------------------
-# SUMMARY
+# SELECTION / SUMMARY
 # -----------------------------
+def grade_order_value(grade):
+    order = {
+        "A": 0,
+        "B": 1,
+        "WATCH": 2,
+    }
+    return order.get(grade, 9)
+
+
+def apply_topn_selection(results, max_count=10, allowed_grades=None):
+    if not results:
+        return []
+
+    if allowed_grades is not None:
+        results = [r for r in results if r.get("grade") in allowed_grades]
+
+    grouped = {}
+
+    for r in results:
+        t = r["signal_time_utc"]
+        grouped.setdefault(t, []).append(r)
+
+    selected = []
+
+    for t, items in grouped.items():
+        items_sorted = sorted(
+            items,
+            key=lambda x: (
+                grade_order_value(x.get("grade")),
+                -safe_float(x.get("score")),
+                -safe_float(x.get("value")),
+                -safe_float(x.get("volume_ratio")),
+            ),
+        )
+
+        selected.extend(items_sorted[:max_count])
+
+    selected = sorted(selected, key=lambda x: x["signal_time_utc"], reverse=True)
+    return selected
+
+
 def summarize_results(results):
     total = len(results)
+
     tp = sum(1 for r in results if r["result"] == "TP")
     sl = sum(1 for r in results if r["result"] == "SL")
     expired = sum(1 for r in results if r["result"] == "EXPIRED")
@@ -700,86 +797,99 @@ def summarize_results(results):
     avg_max_up = np.mean([r["max_up"] for r in results]) if results else 0
     avg_max_down = np.mean([r["max_down"] for r in results]) if results else 0
 
-    summary = {
-        "backtest_days": BACKTEST_DAYS,
-        "total_signals": total,
-        "tp_count": tp,
-        "sl_count": sl,
-        "expired_count": expired,
+    return {
+        "total": total,
+        "tp": tp,
+        "sl": sl,
+        "expired": expired,
         "tp_rate": (tp / total * 100) if total else 0,
         "sl_rate": (sl / total * 100) if total else 0,
         "expired_rate": (expired / total * 100) if total else 0,
-        "avg_final_return": avg_final_return,
-        "avg_max_up": avg_max_up,
-        "avg_max_down": avg_max_down,
-        "by_grade": {}
+        "avg_final_return": float(avg_final_return),
+        "avg_max_up": float(avg_max_up),
+        "avg_max_down": float(avg_max_down),
     }
 
-    for grade in ["A", "B", "WATCH"]:
-        gr = [r for r in results if r["grade"] == grade]
-        g_total = len(gr)
-        g_tp = sum(1 for r in gr if r["result"] == "TP")
-        g_sl = sum(1 for r in gr if r["result"] == "SL")
-        g_expired = sum(1 for r in gr if r["result"] == "EXPIRED")
 
-        summary["by_grade"][grade] = {
-            "total": g_total,
-            "tp": g_tp,
-            "sl": g_sl,
-            "expired": g_expired,
-            "tp_rate": (g_tp / g_total * 100) if g_total else 0,
-            "sl_rate": (g_sl / g_total * 100) if g_total else 0,
-            "expired_rate": (g_expired / g_total * 100) if g_total else 0,
-            "avg_final_return": np.mean([r["final_return"] for r in gr]) if gr else 0,
-            "avg_max_up": np.mean([r["max_up"] for r in gr]) if gr else 0,
-            "avg_max_down": np.mean([r["max_down"] for r in gr]) if gr else 0,
-        }
+def build_group_summaries(results):
+    return {
+        "RAW_ALL": summarize_results(results),
+        f"TOP_{MAX_ALERT_COUNT}_ALL": summarize_results(
+            apply_topn_selection(results, MAX_ALERT_COUNT, allowed_grades=None)
+        ),
+        f"TOP_{MAX_ALERT_COUNT}_A_B": summarize_results(
+            apply_topn_selection(results, MAX_ALERT_COUNT, allowed_grades=["A", "B"])
+        ),
+        f"TOP_{MAX_ALERT_COUNT}_A_ONLY": summarize_results(
+            apply_topn_selection(results, MAX_ALERT_COUNT, allowed_grades=["A"])
+        ),
+        f"TOP_{MAX_ALERT_COUNT}_B_ONLY": summarize_results(
+            apply_topn_selection(results, MAX_ALERT_COUNT, allowed_grades=["B"])
+        ),
+        f"TOP_{MAX_ALERT_COUNT}_WATCH_ONLY": summarize_results(
+            apply_topn_selection(results, MAX_ALERT_COUNT, allowed_grades=["WATCH"])
+        ),
+    }
 
-    return summary
+
+def format_one_summary(name, s):
+    return (
+        f"{name}: {s['total']}개 / "
+        f"TP {s['tp']} ({s['tp_rate']:.1f}%) / "
+        f"SL {s['sl']} ({s['sl_rate']:.1f}%) / "
+        f"만료 {s['expired']} ({s['expired_rate']:.1f}%) / "
+        f"평균 {s['avg_final_return']:+.2f}% / "
+        f"최대상승 {s['avg_max_up']:+.2f}% / "
+        f"최대하락 {s['avg_max_down']:+.2f}%"
+    )
 
 
-def format_summary_message(summary, top_items):
+def format_summary_message(final_summary, main_key, selected_main):
     lines = []
-    lines.append("📊 V3.6 백테스트 결과")
+
+    lines.append("📊 V3.6 백테스트 V1.1 결과")
     lines.append("")
     lines.append(f"실행시간: {now_kst().strftime('%Y-%m-%d %H:%M:%S KST')}")
-    lines.append(f"기간: 최근 {summary['backtest_days']}일")
-    lines.append("기준: 4H 확정봉 / 과열 배제 / 거래대금 필터")
-    lines.append(f"TP: +{TAKE_PROFIT_RATE * 100:.1f}% / SL: -{STOP_LOSS_RATE * 100:.1f}% / 최대보유: {MAX_HOLD_HOURS}시간")
+    lines.append(f"기간: 최근 {BACKTEST_DAYS}일")
+    lines.append(f"실전반영: 동일 4H 시간대별 상위 {MAX_ALERT_COUNT}개 제한")
+    lines.append(f"기준: 4H 확정봉 / 과열 배제 / 거래대금 필터")
     lines.append(f"최소 4H 거래대금: {MIN_4H_TRADE_VALUE / 100_000_000:.1f}억")
     lines.append(f"최소 캔들상승률: +{MIN_CANDLE_CHANGE:.1f}%")
+    lines.append(f"최대보유: {MAX_HOLD_HOURS}시간")
     lines.append("")
-    lines.append("전체 결과")
-    lines.append(f"총 신호: {summary['total_signals']}개")
-    lines.append(f"익절: {summary['tp_count']}개 ({summary['tp_rate']:.1f}%)")
-    lines.append(f"손절: {summary['sl_count']}개 ({summary['sl_rate']:.1f}%)")
-    lines.append(f"만료: {summary['expired_count']}개 ({summary['expired_rate']:.1f}%)")
-    lines.append(f"평균 최종수익률: {summary['avg_final_return']:+.2f}%")
-    lines.append(f"평균 최대상승률: {summary['avg_max_up']:+.2f}%")
-    lines.append(f"평균 최대하락률: {summary['avg_max_down']:+.2f}%")
+
+    lines.append("✅ 메인 조합 결과")
+    lines.append(f"조합: {main_key}")
+    main_groups = final_summary["combo_summaries"][main_key]
+
+    for name in [
+        "RAW_ALL",
+        f"TOP_{MAX_ALERT_COUNT}_ALL",
+        f"TOP_{MAX_ALERT_COUNT}_A_B",
+        f"TOP_{MAX_ALERT_COUNT}_A_ONLY",
+        f"TOP_{MAX_ALERT_COUNT}_B_ONLY",
+        f"TOP_{MAX_ALERT_COUNT}_WATCH_ONLY",
+    ]:
+        lines.append(format_one_summary(name, main_groups[name]))
+
     lines.append("")
-    lines.append("등급별 결과")
+    lines.append("📌 TP/SL 조합 비교")
+    lines.append(f"기준: 동일 시간대 상위 {MAX_ALERT_COUNT}개, A+B만 반영")
 
-    label_map = {
-        "A": "🔥 A급",
-        "B": "🟡 B급",
-        "WATCH": "👀 관찰"
-    }
-
-    for grade in ["A", "B", "WATCH"]:
-        g = summary["by_grade"][grade]
+    for key, groups in final_summary["combo_summaries"].items():
+        s = groups[f"TOP_{MAX_ALERT_COUNT}_A_B"]
         lines.append(
-            f"{label_map[grade]}: {g['total']}개 / "
-            f"TP {g['tp']} ({g['tp_rate']:.1f}%) / "
-            f"SL {g['sl']} ({g['sl_rate']:.1f}%) / "
-            f"만료 {g['expired']} ({g['expired_rate']:.1f}%) / "
-            f"평균 {g['avg_final_return']:+.2f}%"
+            f"{key}: {s['total']}개 / "
+            f"TP {s['tp_rate']:.1f}% / "
+            f"SL {s['sl_rate']:.1f}% / "
+            f"만료 {s['expired_rate']:.1f}% / "
+            f"평균 {s['avg_final_return']:+.2f}%"
         )
 
-    if top_items:
+    if selected_main:
         lines.append("")
-        lines.append("최근 신호 샘플")
-        for idx, r in enumerate(top_items[:10], 1):
+        lines.append("최근 선택 신호 샘플")
+        for idx, r in enumerate(selected_main[:10], 1):
             value_eok = r["value"] / 100_000_000
             lines.append(
                 f"{idx}. {r['market']} {r['grade_label']} {r['result']} "
@@ -791,24 +901,34 @@ def format_summary_message(summary, top_items):
             )
 
     lines.append("")
-    lines.append("※ 백테스트는 과거 캔들 기준 검증이며 실제 체결/슬리피지/동시 TP·SL 순서는 반영되지 않을 수 있습니다.")
-    lines.append("※ 동시 TP·SL 발생 캔들은 보수적으로 SL 처리했습니다.")
+    lines.append("해석 가이드")
+    lines.append("- RAW_ALL: 조건 만족 전체 후보")
+    lines.append(f"- TOP_{MAX_ALERT_COUNT}_ALL: 실제 알림처럼 시간대별 상위 {MAX_ALERT_COUNT}개")
+    lines.append(f"- TOP_{MAX_ALERT_COUNT}_A_B: 관찰 제외, A/B만 반영")
+    lines.append("- 실전 적용은 A+B 결과를 우선 참고하는 것을 추천")
+    lines.append("")
+    lines.append("※ 과거 캔들 기준 검증이며 실제 체결가, 슬리피지, 호가 공백은 반영되지 않았습니다.")
+    lines.append("※ 같은 4H 봉에서 TP/SL 동시 도달 시 보수적으로 SL 처리했습니다.")
 
     return "\n".join(lines)
 
 
-def save_results(results, summary):
-    if results:
-        df = pd.DataFrame(results)
-        df.to_csv(RESULT_CSV_FILE, index=False, encoding="utf-8-sig")
-        print(f"Saved CSV: {RESULT_CSV_FILE}")
+def save_outputs(raw_main, selected_main, final_summary):
+    if raw_main:
+        pd.DataFrame(raw_main).to_csv(RESULT_RAW_CSV_FILE, index=False, encoding="utf-8-sig")
     else:
-        pd.DataFrame().to_csv(RESULT_CSV_FILE, index=False, encoding="utf-8-sig")
-        print(f"Saved empty CSV: {RESULT_CSV_FILE}")
+        pd.DataFrame().to_csv(RESULT_RAW_CSV_FILE, index=False, encoding="utf-8-sig")
+
+    if selected_main:
+        pd.DataFrame(selected_main).to_csv(RESULT_SELECTED_CSV_FILE, index=False, encoding="utf-8-sig")
+    else:
+        pd.DataFrame().to_csv(RESULT_SELECTED_CSV_FILE, index=False, encoding="utf-8-sig")
 
     with open(SUMMARY_JSON_FILE, "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+        json.dump(final_summary, f, ensure_ascii=False, indent=2)
 
+    print(f"Saved raw CSV: {RESULT_RAW_CSV_FILE}")
+    print(f"Saved selected CSV: {RESULT_SELECTED_CSV_FILE}")
     print(f"Saved summary JSON: {SUMMARY_JSON_FILE}")
 
 
@@ -816,13 +936,14 @@ def save_results(results, summary):
 # MAIN
 # -----------------------------
 def main():
-    print("=" * 70)
-    print("Telegram Coin Alert Strategy Backtest V1.0")
+    print("=" * 80)
+    print("Telegram Coin Alert Strategy Backtest V1.1")
     print(f"Now KST: {now_kst().strftime('%Y-%m-%d %H:%M:%S KST')}")
     print(f"BACKTEST_DAYS={BACKTEST_DAYS}")
     print(f"NEED_CANDLES={NEED_CANDLES}")
-    print(f"TP={TAKE_PROFIT_RATE}, SL={STOP_LOSS_RATE}, HOLD={MAX_HOLD_HOURS}h")
-    print("=" * 70)
+    print(f"MAX_ALERT_COUNT={MAX_ALERT_COUNT}")
+    print(f"TP_SL_COMBOS={TP_SL_COMBOS}")
+    print("=" * 80)
 
     start_dt = pd.Timestamp(datetime.now(timezone.utc) - timedelta(days=BACKTEST_DAYS))
     print(f"Backtest start UTC: {start_dt}")
@@ -834,34 +955,76 @@ def main():
     markets = get_krw_markets()
     print(f"KRW markets count: {len(markets)}")
 
-    all_results = []
+    all_results_by_combo = {combo_key(tp, sl): [] for tp, sl in TP_SL_COMBOS}
 
     for idx, market in enumerate(markets, 1):
         print(f"[{idx}/{len(markets)}] Backtesting {market}...")
+
         try:
-            results = backtest_market(market, btc_map, start_dt)
-            print(f"  signals: {len(results)}")
-            all_results.extend(results)
+            market_results_by_combo = backtest_market(market, btc_map, start_dt)
+
+            for key, rows in market_results_by_combo.items():
+                all_results_by_combo.setdefault(key, [])
+                all_results_by_combo[key].extend(rows)
+
+            main_key_tmp = combo_key(TAKE_PROFIT_RATE, STOP_LOSS_RATE)
+            print(f"  main combo signals: {len(market_results_by_combo.get(main_key_tmp, []))}")
+
         except Exception as e:
             print(f"  ERROR {market}: {e}")
 
-    all_results = sorted(all_results, key=lambda x: x["signal_time_utc"], reverse=True)
+    # 정렬
+    for key in all_results_by_combo.keys():
+        all_results_by_combo[key] = sorted(
+            all_results_by_combo[key],
+            key=lambda x: x["signal_time_utc"],
+            reverse=True,
+        )
 
-    summary = summarize_results(all_results)
-    save_results(all_results, summary)
+    main_key = combo_key(TAKE_PROFIT_RATE, STOP_LOSS_RATE)
 
-    top_items = all_results[:10]
-    message = format_summary_message(summary, top_items)
+    if main_key not in all_results_by_combo:
+        main_key = list(all_results_by_combo.keys())[0]
+
+    raw_main = all_results_by_combo[main_key]
+
+    # 실제 운영 기준: 동일 시간대 상위 MAX_ALERT_COUNT, A+B만
+    selected_main = apply_topn_selection(
+        raw_main,
+        max_count=MAX_ALERT_COUNT,
+        allowed_grades=["A", "B"],
+    )
+
+    combo_summaries = {}
+
+    for key, rows in all_results_by_combo.items():
+        combo_summaries[key] = build_group_summaries(rows)
+
+    final_summary = {
+        "version": "V1.1",
+        "created_at_kst": now_kst().strftime("%Y-%m-%d %H:%M:%S KST"),
+        "backtest_days": BACKTEST_DAYS,
+        "max_alert_count": MAX_ALERT_COUNT,
+        "max_hold_hours": MAX_HOLD_HOURS,
+        "min_4h_trade_value": MIN_4H_TRADE_VALUE,
+        "min_candle_change": MIN_CANDLE_CHANGE,
+        "main_combo": main_key,
+        "combo_summaries": combo_summaries,
+    }
+
+    save_outputs(raw_main, selected_main, final_summary)
+
+    message = format_summary_message(final_summary, main_key, selected_main)
 
     print("")
-    print("=" * 70)
+    print("=" * 80)
     print(message)
-    print("=" * 70)
+    print("=" * 80)
 
     if SEND_TELEGRAM_BACKTEST:
         send_telegram_message(message)
 
-    print("Backtest finished.")
+    print("Backtest V1.1 finished.")
 
 
 if __name__ == "__main__":
