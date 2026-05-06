@@ -20,20 +20,42 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: main
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+
+      - name: Show files before run
+        run: |
+          echo "===== Current directory ====="
+          pwd
+          echo "===== Files ====="
+          ls -la
+          echo "===== Git branch ====="
+          git branch --show-current
+          echo "===== Git status ====="
+          git status
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy requests
+
+      - name: Ensure active_signals.json exists
+        run: |
+          if [ ! -f active_signals.json ]; then
+            echo '{"active":[],"closed":[]}' > active_signals.json
+            echo "Created active_signals.json"
+          else
+            echo "active_signals.json already exists"
+          fi
+          echo "===== active_signals.json before bot ====="
+          cat active_signals.json
 
       - name: Run Telegram alert bot
         env:
@@ -60,7 +82,7 @@ jobs:
 
       - name: Show active_signals.json after bot
         run: |
-          echo "===== active_signals.json ====="
+          echo "===== active_signals.json after bot ====="
           if [ -f active_signals.json ]; then
             cat active_signals.json
           else
@@ -76,7 +98,6 @@ jobs:
           git status
 
           if [ -f active_signals.json ]; then
-            echo "===== active_signals.json exists ====="
             git add active_signals.json
 
             echo "===== Git diff cached ====="
