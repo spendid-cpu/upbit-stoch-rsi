@@ -20,31 +20,29 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: main
+          persist-credentials: true
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Show files before run
+      - name: Show environment
         run: |
-          echo "===== Current directory ====="
+          echo "===== pwd ====="
           pwd
-          echo "===== Files ====="
+          echo "===== files ====="
           ls -la
-          echo "===== Git branch ====="
-          git branch --show-current
-          echo "===== Git status ====="
+          echo "===== git status ====="
           git status
+          echo "===== python version ====="
+          python3 --version
+          echo "===== pip version ====="
+          python3 -m pip --version
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install pandas numpy requests
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pandas numpy requests
 
       - name: Ensure active_signals.json exists
         run: |
@@ -54,6 +52,7 @@ jobs:
           else
             echo "active_signals.json already exists"
           fi
+
           echo "===== active_signals.json before bot ====="
           cat active_signals.json
 
@@ -78,9 +77,11 @@ jobs:
 
           MIN_4H_TRADE_VALUE: "150000000"
           MIN_CANDLE_CHANGE: "0.7"
-        run: python alert_bot.py
+        run: |
+          python3 alert_bot.py
 
       - name: Show active_signals.json after bot
+        if: always()
         run: |
           echo "===== active_signals.json after bot ====="
           if [ -f active_signals.json ]; then
@@ -90,30 +91,42 @@ jobs:
           fi
 
       - name: Commit signal state
+        if: always()
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          echo "===== Git status before add ====="
+          echo "===== git status before commit ====="
           git status
 
-          if [ -f active_signals.json ]; then
-            git add active_signals.json
-
-            echo "===== Git diff cached ====="
-            git diff --cached -- active_signals.json || true
-
-            if git diff --cached --quiet; then
-              echo "No active_signals.json changes to commit."
-            else
-              git commit -m "update active signals"
-
-              echo "===== Pull latest before push ====="
-              git pull --rebase origin main
-
-              echo "===== Push active_signals.json ====="
-              git push origin main
-            fi
-          else
+          if [ ! -f active_signals.json ]; then
             echo "active_signals.json not found. Nothing to commit."
+            exit 0
           fi
+
+          git add active_signals.json
+
+          if git diff --cached --quiet; then
+            echo "No active_signals.json changes to commit."
+            exit 0
+          fi
+
+          echo "===== commit active_signals.json ====="
+          git commit -m "update active signals"
+
+          echo "===== push try 1 ====="
+          if git push origin main; then
+            echo "Push success."
+            exit 0
+          fi
+
+          echo "Push failed. Retry with pull --rebase."
+
+          git pull --rebase origin main || {
+            echo "Pull rebase failed."
+            git rebase --abort || true
+            exit 1
+          }
+
+          echo "===== push try 2 ====="
+          git push origin main
