@@ -7,10 +7,32 @@ on:
         description: "Backtest period in days"
         required: true
         default: "60"
+
       max_markets:
         description: "Max KRW markets to test. Use 999 for all."
         required: true
         default: "999"
+
+      max_alert_count:
+        description: "Max selected alerts per 4H candle time"
+        required: true
+        default: "10"
+
+      main_take_profit:
+        description: "Main TP rate. Example 0.05 = +5%"
+        required: true
+        default: "0.05"
+
+      main_stop_loss:
+        description: "Main SL rate. Example 0.04 = -4%"
+        required: true
+        default: "0.04"
+
+      tp_sl_sets:
+        description: "TP/SL compare sets. Format 0.04:0.04,0.045:0.04,0.05:0.04"
+        required: true
+        default: "0.04:0.04,0.045:0.04,0.05:0.04,0.04:0.035"
+
       send_telegram:
         description: "Send result to Telegram? true/false"
         required: true
@@ -41,19 +63,24 @@ jobs:
 
           BACKTEST_DAYS: ${{ github.event.inputs.backtest_days }}
           BACKTEST_MAX_MARKETS: ${{ github.event.inputs.max_markets }}
+          MAX_ALERT_COUNT: ${{ github.event.inputs.max_alert_count }}
+
+          TAKE_PROFIT_RATE: ${{ github.event.inputs.main_take_profit }}
+          STOP_LOSS_RATE: ${{ github.event.inputs.main_stop_loss }}
+          TP_SL_SETS: ${{ github.event.inputs.tp_sl_sets }}
+
           SEND_TELEGRAM_BACKTEST: ${{ github.event.inputs.send_telegram }}
 
           REQUEST_DELAY: "0.09"
 
-          TAKE_PROFIT_RATE: "0.05"
-          STOP_LOSS_RATE: "0.04"
           MAX_HOLD_HOURS: "48"
           SIGNAL_COOLDOWN_HOURS: "12"
 
           MIN_4H_TRADE_VALUE: "150000000"
           MIN_CANDLE_CHANGE: "0.7"
 
-          RESULT_CSV_FILE: "backtest_results.csv"
+          RESULT_RAW_CSV_FILE: "backtest_raw_results.csv"
+          RESULT_SELECTED_CSV_FILE: "backtest_selected_results.csv"
           SUMMARY_JSON_FILE: "backtest_summary.json"
         run: python backtest.py
 
@@ -62,5 +89,6 @@ jobs:
         with:
           name: backtest-results
           path: |
-            backtest_results.csv
+            backtest_raw_results.csv
+            backtest_selected_results.csv
             backtest_summary.json
