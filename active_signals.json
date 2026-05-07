@@ -21,9 +21,9 @@
       "ma20_dev": 2.737157855268091,
       "recent_3bar": 3.007518796992481,
       "status": "active",
-      "last_price": 137.0,
-      "last_return_rate": 0.0,
-      "last_checked_kst": "2026-05-07 02:51:33 KST"
+      "last_price": 134.0,
+      "last_return_rate": -2.1897810218978075,
+      "last_checked_kst": "2026-05-07 13:03:59 KST"
     },
     {
       "market": "KRW-APT",
@@ -46,9 +46,9 @@
       "ma20_dev": 2.4358491212443045,
       "recent_3bar": 3.891591382904802,
       "status": "active",
-      "last_price": 1490.0,
-      "last_return_rate": -0.33444816053511683,
-      "last_checked_kst": "2026-05-07 02:51:33 KST"
+      "last_price": 1469.0,
+      "last_return_rate": -1.7391304347826098,
+      "last_checked_kst": "2026-05-07 13:03:59 KST"
     },
     {
       "market": "KRW-VANA",
@@ -71,9 +71,9 @@
       "ma20_dev": 2.656923867623062,
       "recent_3bar": 2.4988844265952714,
       "status": "active",
-      "last_price": 2331.0,
-      "last_return_rate": 1.480191554201138,
-      "last_checked_kst": "2026-05-07 02:51:33 KST"
+      "last_price": 2351.0,
+      "last_return_rate": 2.3508924684370935,
+      "last_checked_kst": "2026-05-07 13:03:59 KST"
     },
     {
       "market": "KRW-IOST",
@@ -96,9 +96,9 @@
       "ma20_dev": 2.8391167192429068,
       "recent_3bar": 2.515723270440229,
       "status": "active",
-      "last_price": 1.62,
-      "last_return_rate": -0.6134969325153228,
-      "last_checked_kst": "2026-05-07 02:51:33 KST"
+      "last_price": 1.6,
+      "last_return_rate": -1.8404907975460016,
+      "last_checked_kst": "2026-05-07 13:03:59 KST"
     },
     {
       "market": "KRW-KAITO",
@@ -120,7 +120,10 @@
       "candle_change": 2.646239554317553,
       "ma20_dev": 2.696300424998266,
       "recent_3bar": 3.656821378340358,
-      "status": "active"
+      "status": "active",
+      "last_price": 750.0,
+      "last_return_rate": 1.7639077340569909,
+      "last_checked_kst": "2026-05-07 13:03:59 KST"
     }
   ],
   "closed": []
