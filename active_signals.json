@@ -23,7 +23,13 @@
       "status": "active",
       "last_price": 138.0,
       "last_return_rate": 0.7299270072992803,
-      "last_checked_kst": "2026-05-07 19:34:52 KST"
+      "last_checked_kst": "2026-05-07 19:34:52 KST",
+      "current_price": 139.0,
+      "current_profit_rate": 0.014598540145985384,
+      "max_profit_rate": 0.014598540145985384,
+      "min_profit_rate": 0.014598540145985384,
+      "last_checked_at": "2026-05-07 21:53:00 KST",
+      "notice_flags": {}
     },
     {
       "market": "KRW-APT",
@@ -48,7 +54,13 @@
       "status": "active",
       "last_price": 1493.0,
       "last_return_rate": -0.13377926421405117,
-      "last_checked_kst": "2026-05-07 19:34:52 KST"
+      "last_checked_kst": "2026-05-07 19:34:52 KST",
+      "current_price": 1507.0,
+      "current_profit_rate": 0.008026755852842848,
+      "max_profit_rate": 0.008026755852842848,
+      "min_profit_rate": 0.008026755852842848,
+      "last_checked_at": "2026-05-07 21:53:00 KST",
+      "notice_flags": {}
     },
     {
       "market": "KRW-VANA",
@@ -73,7 +85,15 @@
       "status": "active",
       "last_price": 2325.0,
       "last_return_rate": 1.2189812799303423,
-      "last_checked_kst": "2026-05-07 19:34:52 KST"
+      "last_checked_kst": "2026-05-07 19:34:52 KST",
+      "current_price": 2360.0,
+      "current_profit_rate": 0.027427078798432758,
+      "max_profit_rate": 0.027427078798432758,
+      "min_profit_rate": 0.027427078798432758,
+      "last_checked_at": "2026-05-07 21:53:00 KST",
+      "notice_flags": {
+        "profit_2": true
+      }
     },
     {
       "market": "KRW-IOST",
@@ -98,7 +118,13 @@
       "status": "active",
       "last_price": 1.63,
       "last_return_rate": 0.0,
-      "last_checked_kst": "2026-05-07 19:34:52 KST"
+      "last_checked_kst": "2026-05-07 19:34:52 KST",
+      "current_price": 1.65,
+      "current_profit_rate": 0.012269938650306678,
+      "max_profit_rate": 0.012269938650306678,
+      "min_profit_rate": 0.012269938650306678,
+      "last_checked_at": "2026-05-07 21:53:00 KST",
+      "notice_flags": {}
     },
     {
       "market": "KRW-KAITO",
@@ -123,7 +149,13 @@
       "status": "active",
       "last_price": 737.0,
       "last_return_rate": 0.0,
-      "last_checked_kst": "2026-05-07 19:34:52 KST"
+      "last_checked_kst": "2026-05-07 19:34:52 KST",
+      "current_price": 746.0,
+      "current_profit_rate": 0.012211668928086894,
+      "max_profit_rate": 0.012211668928086894,
+      "min_profit_rate": 0.012211668928086894,
+      "last_checked_at": "2026-05-07 21:53:00 KST",
+      "notice_flags": {}
     },
     {
       "market": "KRW-IMX",
@@ -145,7 +177,13 @@
       "candle_change": 2.371541501976293,
       "ma20_dev": 2.20994475138121,
       "recent_3bar": 1.5686274509803866,
-      "status": "active"
+      "status": "active",
+      "current_price": 260.0,
+      "current_profit_rate": 0.0038610038610038533,
+      "max_profit_rate": 0.0038610038610038533,
+      "min_profit_rate": 0.0038610038610038533,
+      "last_checked_at": "2026-05-07 21:53:00 KST",
+      "notice_flags": {}
     }
   ],
   "closed": []
