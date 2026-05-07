@@ -1,0 +1,99 @@
+name: Signal Tracker
+
+permissions:
+  contents: write
+
+concurrency:
+  group: telegram-signal-state
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every 30 minutes
+    - cron: "0,30 * * * *"
+
+jobs:
+  tracker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          persist-credentials: true
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pandas numpy requests
+
+      - name: Ensure active_signals.json exists
+        run: |
+          if [ ! -f active_signals.json ]; then
+            echo '{"active":[],"closed":[]}' > active_signals.json
+          fi
+          cat active_signals.json
+
+      - name: Check Python syntax
+        run: |
+          python3 -m py_compile alert_bot.py
+          echo "alert_bot.py syntax OK"
+
+      - name: Run signal tracker only
+        env:
+          RUN_MODE: "track"
+
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          ENABLE_SIGNAL_TRACKING: "true"
+          SIGNAL_STATE_FILE: "active_signals.json"
+
+          TAKE_PROFIT_RATE: "0.05"
+          STOP_LOSS_RATE: "0.04"
+          MAX_HOLD_HOURS: "48"
+
+          TRACK_PROFIT_NOTICE_1: "0.02"
+          TRACK_PROFIT_NOTICE_2: "0.03"
+          TRACK_NEAR_TP_RATE: "0.015"
+          TRACK_NEAR_SL_RATE: "0.015"
+          TRACK_DRAWDOWN_FROM_HIGH: "0.02"
+        run: python3 alert_bot.py
+
+      - name: Show active_signals.json after tracker
+        if: always()
+        run: |
+          echo "===== active_signals.json after tracker ====="
+          cat active_signals.json || echo "active_signals.json not found"
+
+      - name: Commit signal state
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ ! -f active_signals.json ]; then
+            echo "active_signals.json not found. Skip commit."
+            exit 0
+          fi
+
+          git add active_signals.json
+
+          if git diff --cached --quiet; then
+            echo "No active_signals.json changes to commit."
+            exit 0
+          fi
+
+          git commit -m "update signal tracker state"
+
+          if git push origin main; then
+            echo "Push success."
+            exit 0
+          fi
+
+          echo "Push failed. Try pull --rebase then push again."
+          git pull --rebase origin main || { git rebase --abort || true; exit 1; }
+          git push origin main
