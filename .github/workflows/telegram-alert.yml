@@ -10,9 +10,9 @@ concurrency:
 on:
   workflow_dispatch:
   schedule:
-    # KST 01:10, 09:10, 13:10, 17:10, 21:10
-    # UTC 16:10, 00:10, 04:10, 08:10, 12:10
-    - cron: "10 0,4,8,12,16 * * *"
+    # KST 01:10, 05:10, 09:10, 13:10, 17:10, 21:10
+    # GitHub Actions cron is UTC
+    - cron: "10 0,4,8,12,16,20 * * *"
 
 jobs:
   alert:
@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: main
@@ -28,48 +28,38 @@ jobs:
 
       - name: Show environment
         run: |
-          echo "===== PWD ====="
+          echo "===== Current directory ====="
           pwd
-
-          echo "===== FILES ====="
+          echo "===== Files ====="
           ls -la
-
-          echo "===== GIT STATUS ====="
-          git status
-
-          echo "===== PYTHON ====="
+          echo "===== Python ====="
           python3 --version
-
-          echo "===== PIP ====="
           python3 -m pip --version
+          echo "===== Git status ====="
+          git status
 
       - name: Install dependencies
         run: |
-          set -x
           python3 -m pip install --upgrade pip
           python3 -m pip install pandas numpy requests
 
-      - name: Check Python syntax
-        run: |
-          set -x
-          python3 -m py_compile alert_bot.py
-          echo "alert_bot.py syntax OK"
-
       - name: Ensure active_signals.json exists
         run: |
-          set -x
           if [ ! -f active_signals.json ]; then
             echo '{"active":[],"closed":[]}' > active_signals.json
-            echo "Created active_signals.json"
-          else
-            echo "active_signals.json already exists"
           fi
-
           echo "===== active_signals.json before bot ====="
           cat active_signals.json
 
+      - name: Check Python syntax
+        run: |
+          python3 -m py_compile alert_bot.py
+          echo "alert_bot.py syntax OK"
+
       - name: Run Telegram alert bot
         env:
+          RUN_MODE: "full"
+
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
@@ -89,41 +79,37 @@ jobs:
 
           MIN_4H_TRADE_VALUE: "150000000"
           MIN_CANDLE_CHANGE: "0.7"
-        run: |
-          set -x
-          python3 alert_bot.py
+
+          ENABLE_LIVE_PRICE_CHECK: "true"
+          ENTRY_OK_MAX_GAP: "1.0"
+          ENTRY_CAUTION_MAX_GAP: "2.0"
+          ENTRY_CHASE_MAX_GAP: "3.0"
+
+          TRACK_PROFIT_NOTICE_1: "0.02"
+          TRACK_PROFIT_NOTICE_2: "0.03"
+          TRACK_NEAR_TP_RATE: "0.015"
+          TRACK_NEAR_SL_RATE: "0.015"
+          TRACK_DRAWDOWN_FROM_HIGH: "0.02"
+        run: python3 alert_bot.py
 
       - name: Show active_signals.json after bot
         if: always()
         run: |
           echo "===== active_signals.json after bot ====="
-          if [ -f active_signals.json ]; then
-            cat active_signals.json
-          else
-            echo "active_signals.json not found"
-          fi
+          cat active_signals.json || echo "active_signals.json not found"
 
       - name: Commit signal state
         if: always()
-        continue-on-error: true
         run: |
-          set -x
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          echo "===== GIT STATUS BEFORE COMMIT ====="
-          git status
-
           if [ ! -f active_signals.json ]; then
-            echo "active_signals.json not found. Nothing to commit."
+            echo "active_signals.json not found. Skip commit."
             exit 0
           fi
 
           git add active_signals.json
-
-          echo "===== CACHED DIFF ====="
-          git diff --cached -- active_signals.json || true
 
           if git diff --cached --quiet; then
             echo "No active_signals.json changes to commit."
@@ -132,10 +118,11 @@ jobs:
 
           git commit -m "update active signals"
 
-          echo "===== PULL REBASE ====="
-          git pull --rebase origin main || true
+          if git push origin main; then
+            echo "Push success."
+            exit 0
+          fi
 
-          echo "===== PUSH ====="
-          git push origin main || true
-
-          echo "Commit step finished."
+          echo "Push failed. Try pull --rebase then push again."
+          git pull --rebase origin main || { git rebase --abort || true; exit 1; }
+          git push origin main
