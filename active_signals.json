@@ -28,7 +28,7 @@
       "current_profit_rate": 0.029197080291970767,
       "max_profit_rate": 0.03649635036496357,
       "min_profit_rate": -0.014598540145985384,
-      "last_checked_at": "2026-05-09 02:41:06 KST",
+      "last_checked_at": "2026-05-09 02:44:33 KST",
       "notice_flags": {
         "profit_2": true,
         "profit_3": true,
@@ -63,7 +63,7 @@
       "current_profit_rate": 0.030674846625766916,
       "max_profit_rate": 0.030674846625766916,
       "min_profit_rate": -0.006134969325153228,
-      "last_checked_at": "2026-05-09 02:41:06 KST",
+      "last_checked_at": "2026-05-09 02:44:33 KST",
       "notice_flags": {
         "profit_2": true,
         "profit_3": true
@@ -93,11 +93,11 @@
       "last_price": 737.0,
       "last_return_rate": 0.0,
       "last_checked_kst": "2026-05-07 19:34:52 KST",
-      "current_price": 767.0,
-      "current_profit_rate": 0.04070556309362283,
+      "current_price": 766.0,
+      "current_profit_rate": 0.03934871099050197,
       "max_profit_rate": 0.04748982360922649,
       "min_profit_rate": 0.0027137042062415073,
-      "last_checked_at": "2026-05-09 02:41:06 KST",
+      "last_checked_at": "2026-05-09 02:44:33 KST",
       "notice_flags": {
         "profit_2": true,
         "drawdown_from_high": true,
@@ -130,7 +130,7 @@
       "current_profit_rate": 0.04633204633204624,
       "max_profit_rate": 0.04633204633204624,
       "min_profit_rate": -0.02316602316602312,
-      "last_checked_at": "2026-05-09 02:41:06 KST",
+      "last_checked_at": "2026-05-09 02:44:33 KST",
       "notice_flags": {
         "profit_2": true,
         "profit_3": true,
@@ -170,7 +170,7 @@
         "close_position": 0.9545454545454546,
         "upper_wick": 0.045454545454545456
       },
-      "last_checked_at": "2026-05-09 02:41:06 KST"
+      "last_checked_at": "2026-05-09 02:44:33 KST"
     }
   ],
   "closed": [
