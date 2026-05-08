@@ -24,11 +24,11 @@
       "last_price": 138.0,
       "last_return_rate": 0.7299270072992803,
       "last_checked_kst": "2026-05-07 19:34:52 KST",
-      "current_price": 137.0,
-      "current_profit_rate": 0.0,
+      "current_price": 138.0,
+      "current_profit_rate": 0.007299270072992803,
       "max_profit_rate": 0.014598540145985384,
       "min_profit_rate": -0.014598540145985384,
-      "last_checked_at": "2026-05-08 10:21:03 KST",
+      "last_checked_at": "2026-05-08 12:48:20 KST",
       "notice_flags": {}
     },
     {
@@ -55,12 +55,16 @@
       "last_price": 1493.0,
       "last_return_rate": -0.13377926421405117,
       "last_checked_kst": "2026-05-07 19:34:52 KST",
-      "current_price": 1520.0,
-      "current_profit_rate": 0.01672240802675584,
-      "max_profit_rate": 0.01672240802675584,
+      "current_price": 1548.0,
+      "current_profit_rate": 0.03545150501672234,
+      "max_profit_rate": 0.03545150501672234,
       "min_profit_rate": -0.012040133779264162,
-      "last_checked_at": "2026-05-08 10:21:03 KST",
-      "notice_flags": {}
+      "last_checked_at": "2026-05-08 12:48:20 KST",
+      "notice_flags": {
+        "profit_2": true,
+        "profit_3": true,
+        "near_tp": true
+      }
     },
     {
       "market": "KRW-IOST",
@@ -90,7 +94,7 @@
       "current_profit_rate": 0.0,
       "max_profit_rate": 0.012269938650306678,
       "min_profit_rate": -0.006134969325153228,
-      "last_checked_at": "2026-05-08 10:21:03 KST",
+      "last_checked_at": "2026-05-08 12:48:20 KST",
       "notice_flags": {}
     },
     {
@@ -117,11 +121,11 @@
       "last_price": 737.0,
       "last_return_rate": 0.0,
       "last_checked_kst": "2026-05-07 19:34:52 KST",
-      "current_price": 755.0,
-      "current_profit_rate": 0.024423337856173788,
+      "current_price": 743.0,
+      "current_profit_rate": 0.008141112618724522,
       "max_profit_rate": 0.024423337856173788,
-      "min_profit_rate": 0.012211668928086894,
-      "last_checked_at": "2026-05-08 10:21:03 KST",
+      "min_profit_rate": 0.008141112618724522,
+      "last_checked_at": "2026-05-08 12:48:20 KST",
       "notice_flags": {
         "profit_2": true
       }
@@ -147,11 +151,11 @@
       "ma20_dev": 2.20994475138121,
       "recent_3bar": 1.5686274509803866,
       "status": "active",
-      "current_price": 256.0,
-      "current_profit_rate": -0.01158301158301156,
+      "current_price": 258.0,
+      "current_profit_rate": -0.0038610038610038533,
       "max_profit_rate": 0.0038610038610038533,
       "min_profit_rate": -0.02316602316602312,
-      "last_checked_at": "2026-05-08 10:21:03 KST",
+      "last_checked_at": "2026-05-08 12:48:20 KST",
       "notice_flags": {}
     },
     {
@@ -160,7 +164,7 @@
       "score": 285,
       "status": "active",
       "entry_price": 56.1,
-      "current_price": 56.4,
+      "current_price": 58.3,
       "tp_price": 58.905,
       "sl_price": 53.856,
       "take_profit_rate": 0.05,
@@ -169,10 +173,14 @@
       "expire_at": "2026-05-10 06:16:19 KST",
       "signal_candle_start": "2026-05-08 01:00:00 KST",
       "signal_candle_end": "2026-05-08 05:00:00 KST",
-      "max_profit_rate": 0.005347593582887722,
+      "max_profit_rate": 0.039215686274509665,
       "min_profit_rate": -0.0089126559714795,
-      "current_profit_rate": 0.005347593582887722,
-      "notice_flags": {},
+      "current_profit_rate": 0.039215686274509665,
+      "notice_flags": {
+        "profit_2": true,
+        "profit_3": true,
+        "near_tp": true
+      },
       "raw": {
         "trade_value": 2416644305.029786,
         "volume_ratio": 2.2494603025977034,
@@ -185,7 +193,7 @@
         "close_position": 0.8611111111111112,
         "upper_wick": 0.13888888888888884
       },
-      "last_checked_at": "2026-05-08 10:21:03 KST"
+      "last_checked_at": "2026-05-08 12:48:20 KST"
     }
   ],
   "closed": [
