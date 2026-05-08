@@ -28,7 +28,7 @@
       "current_profit_rate": 0.036809815950920255,
       "max_profit_rate": 0.036809815950920255,
       "min_profit_rate": -0.006134969325153228,
-      "last_checked_at": "2026-05-09 06:13:09 KST",
+      "last_checked_at": "2026-05-09 07:31:16 KST",
       "notice_flags": {
         "profit_2": true,
         "profit_3": true,
@@ -59,11 +59,11 @@
       "last_price": 737.0,
       "last_return_rate": 0.0,
       "last_checked_kst": "2026-05-07 19:34:52 KST",
-      "current_price": 756.0,
-      "current_profit_rate": 0.02578018995929443,
+      "current_price": 759.0,
+      "current_profit_rate": 0.029850746268656803,
       "max_profit_rate": 0.04748982360922649,
       "min_profit_rate": 0.0027137042062415073,
-      "last_checked_at": "2026-05-09 06:13:09 KST",
+      "last_checked_at": "2026-05-09 07:31:16 KST",
       "notice_flags": {
         "profit_2": true,
         "drawdown_from_high": true,
