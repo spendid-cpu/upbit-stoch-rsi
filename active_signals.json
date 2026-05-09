@@ -28,7 +28,7 @@
       "current_profit_rate": 0.030674846625766916,
       "max_profit_rate": 0.042944785276073594,
       "min_profit_rate": -0.006134969325153228,
-      "last_checked_at": "2026-05-10 02:06:41 KST",
+      "last_checked_at": "2026-05-10 02:32:31 KST",
       "notice_flags": {
         "profit_2": true,
         "profit_3": true,
@@ -68,7 +68,7 @@
         "close_position": 0.9724770642201835,
         "upper_wick": 0.027522935779816515
       },
-      "last_checked_at": "2026-05-10 02:06:41 KST"
+      "last_checked_at": "2026-05-10 02:32:31 KST"
     }
   ],
   "closed": [
