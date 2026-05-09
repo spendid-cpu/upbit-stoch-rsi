@@ -28,7 +28,7 @@
       "current_profit_rate": 0.042944785276073594,
       "max_profit_rate": 0.042944785276073594,
       "min_profit_rate": -0.006134969325153228,
-      "last_checked_at": "2026-05-09 15:25:13 KST",
+      "last_checked_at": "2026-05-09 17:17:56 KST",
       "notice_flags": {
         "profit_2": true,
         "profit_3": true,
@@ -41,7 +41,7 @@
       "score": 265,
       "status": "active",
       "entry_price": 699.0,
-      "current_price": 726.0,
+      "current_price": 721.0,
       "tp_price": 733.95,
       "sl_price": 671.04,
       "take_profit_rate": 0.05,
@@ -50,10 +50,13 @@
       "expire_at": "2026-05-11 15:27:54 KST",
       "signal_candle_start": "2026-05-09 09:00:00 KST",
       "signal_candle_end": "2026-05-09 13:00:00 KST",
-      "max_profit_rate": 0.0,
+      "max_profit_rate": 0.03147353361945626,
       "min_profit_rate": 0.0,
-      "current_profit_rate": 0.0,
-      "notice_flags": {},
+      "current_profit_rate": 0.03147353361945626,
+      "notice_flags": {
+        "profit_2": true,
+        "profit_3": true
+      },
       "raw": {
         "trade_value": 336089490.0617818,
         "volume_ratio": 3.710626412885228,
@@ -65,7 +68,8 @@
         "ma20_gap": 3.8016038016038145,
         "close_position": 1.0,
         "upper_wick": 0.0
-      }
+      },
+      "last_checked_at": "2026-05-09 17:17:56 KST"
     },
     {
       "market": "KRW-COMP",
@@ -73,7 +77,7 @@
       "score": 255,
       "status": "active",
       "entry_price": 34870.0,
-      "current_price": 34150.0,
+      "current_price": 34010.0,
       "tp_price": 36613.5,
       "sl_price": 33475.2,
       "take_profit_rate": 0.05,
@@ -83,8 +87,8 @@
       "signal_candle_start": "2026-05-09 09:00:00 KST",
       "signal_candle_end": "2026-05-09 13:00:00 KST",
       "max_profit_rate": 0.0,
-      "min_profit_rate": 0.0,
-      "current_profit_rate": 0.0,
+      "min_profit_rate": -0.024663034126756522,
+      "current_profit_rate": -0.024663034126756522,
       "notice_flags": {},
       "raw": {
         "trade_value": 360019230.9305964,
@@ -97,7 +101,8 @@
         "ma20_gap": 1.9411799099573246,
         "close_position": 0.9724770642201835,
         "upper_wick": 0.027522935779816515
-      }
+      },
+      "last_checked_at": "2026-05-09 17:17:56 KST"
     }
   ],
   "closed": [
