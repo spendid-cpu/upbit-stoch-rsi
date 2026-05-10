@@ -6,7 +6,7 @@
       "score": 255,
       "status": "active",
       "entry_price": 34870.0,
-      "current_price": 34380.0,
+      "current_price": 34360.0,
       "tp_price": 36613.5,
       "sl_price": 33475.2,
       "take_profit_rate": 0.05,
@@ -17,7 +17,7 @@
       "signal_candle_end": "2026-05-09 13:00:00 KST",
       "max_profit_rate": 0.0,
       "min_profit_rate": -0.03900200745626614,
-      "current_profit_rate": -0.014052193862919449,
+      "current_profit_rate": -0.014625752796099789,
       "notice_flags": {
         "near_sl": true
       },
@@ -33,7 +33,7 @@
         "close_position": 0.9724770642201835,
         "upper_wick": 0.027522935779816515
       },
-      "last_checked_at": "2026-05-11 03:32:45 KST"
+      "last_checked_at": "2026-05-11 05:00:41 KST"
     },
     {
       "market": "KRW-KNC",
@@ -68,7 +68,7 @@
         "close_position": 0.8571428571428571,
         "upper_wick": 0.14285714285714285
       },
-      "last_checked_at": "2026-05-11 03:32:45 KST"
+      "last_checked_at": "2026-05-11 05:00:41 KST"
     }
   ],
   "closed": [
