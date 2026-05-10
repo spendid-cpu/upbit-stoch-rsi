@@ -24,11 +24,11 @@
       "last_price": 1.63,
       "last_return_rate": 0.0,
       "last_checked_kst": "2026-05-07 19:34:52 KST",
-      "current_price": 1.67,
-      "current_profit_rate": 0.024539877300613577,
+      "current_price": 1.68,
+      "current_profit_rate": 0.030674846625766916,
       "max_profit_rate": 0.042944785276073594,
       "min_profit_rate": -0.006134969325153228,
-      "last_checked_at": "2026-05-10 10:21:52 KST",
+      "last_checked_at": "2026-05-10 13:08:08 KST",
       "notice_flags": {
         "profit_2": true,
         "profit_3": true,
@@ -41,7 +41,7 @@
       "score": 255,
       "status": "active",
       "entry_price": 34870.0,
-      "current_price": 33640.0,
+      "current_price": 33580.0,
       "tp_price": 36613.5,
       "sl_price": 33475.2,
       "take_profit_rate": 0.05,
@@ -52,7 +52,7 @@
       "signal_candle_end": "2026-05-09 13:00:00 KST",
       "max_profit_rate": 0.0,
       "min_profit_rate": -0.03900200745626614,
-      "current_profit_rate": -0.035273874390593596,
+      "current_profit_rate": -0.03699455119013484,
       "notice_flags": {
         "near_sl": true
       },
@@ -68,7 +68,39 @@
         "close_position": 0.9724770642201835,
         "upper_wick": 0.027522935779816515
       },
-      "last_checked_at": "2026-05-10 10:21:52 KST"
+      "last_checked_at": "2026-05-10 13:08:08 KST"
+    },
+    {
+      "market": "KRW-KNC",
+      "grade": "B",
+      "score": 250,
+      "status": "active",
+      "entry_price": 237.0,
+      "current_price": 237.0,
+      "tp_price": 248.85000000000002,
+      "sl_price": 227.51999999999998,
+      "take_profit_rate": 0.05,
+      "stop_loss_rate": 0.04,
+      "recommended_at": "2026-05-10 13:10:30 KST",
+      "expire_at": "2026-05-12 13:10:30 KST",
+      "signal_candle_start": "2026-05-10 09:00:00 KST",
+      "signal_candle_end": "2026-05-10 13:00:00 KST",
+      "max_profit_rate": 0.0,
+      "min_profit_rate": 0.0,
+      "current_profit_rate": 0.0,
+      "notice_flags": {},
+      "raw": {
+        "trade_value": 3683678205.333486,
+        "volume_ratio": 12.985609144235177,
+        "candle_change": 5.333333333333323,
+        "change_3": 4.405286343612325,
+        "stoch_k": 73.96798795491607,
+        "stoch_d": 75.90969427570735,
+        "mid_k": 87.9332846334281,
+        "ma20_gap": 5.239786856127893,
+        "close_position": 0.8571428571428571,
+        "upper_wick": 0.14285714285714285
+      }
     }
   ],
   "closed": [
