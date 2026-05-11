@@ -1,47 +1,12 @@
 {
   "active": [
     {
-      "market": "KRW-COMP",
-      "grade": "B",
-      "score": 255,
-      "status": "active",
-      "entry_price": 34870.0,
-      "current_price": 34000.0,
-      "tp_price": 36613.5,
-      "sl_price": 33475.2,
-      "take_profit_rate": 0.05,
-      "stop_loss_rate": 0.04,
-      "recommended_at": "2026-05-09 15:27:54 KST",
-      "expire_at": "2026-05-11 15:27:54 KST",
-      "signal_candle_start": "2026-05-09 09:00:00 KST",
-      "signal_candle_end": "2026-05-09 13:00:00 KST",
-      "max_profit_rate": 0.0,
-      "min_profit_rate": -0.03900200745626614,
-      "current_profit_rate": -0.024949813593346692,
-      "notice_flags": {
-        "near_sl": true
-      },
-      "raw": {
-        "trade_value": 360019230.9305964,
-        "volume_ratio": 2.868519804599638,
-        "candle_change": 2.7401296405421327,
-        "change_3": 5.955636584624724,
-        "stoch_k": 65.21827481259231,
-        "stoch_d": 40.12153574308072,
-        "mid_k": 49.79898160535979,
-        "ma20_gap": 1.9411799099573246,
-        "close_position": 0.9724770642201835,
-        "upper_wick": 0.027522935779816515
-      },
-      "last_checked_at": "2026-05-11 14:39:51 KST"
-    },
-    {
       "market": "KRW-KNC",
       "grade": "B",
       "score": 250,
       "status": "active",
       "entry_price": 237.0,
-      "current_price": 230.0,
+      "current_price": 231.0,
       "tp_price": 248.85000000000002,
       "sl_price": 227.51999999999998,
       "take_profit_rate": 0.05,
@@ -52,7 +17,7 @@
       "signal_candle_end": "2026-05-10 13:00:00 KST",
       "max_profit_rate": 0.00843881856540074,
       "min_profit_rate": -0.03797468354430378,
-      "current_profit_rate": -0.029535864978902926,
+      "current_profit_rate": -0.025316455696202556,
       "notice_flags": {
         "near_sl": true
       },
@@ -68,7 +33,7 @@
         "close_position": 0.8571428571428571,
         "upper_wick": 0.14285714285714285
       },
-      "last_checked_at": "2026-05-11 14:39:51 KST"
+      "last_checked_at": "2026-05-11 18:51:46 KST"
     }
   ],
   "closed": [
@@ -425,6 +390,45 @@
       "closed_at": "2026-05-10 16:40:01 KST",
       "final_price": 1.72,
       "final_profit_rate": 0.05521472392638049
+    },
+    {
+      "market": "KRW-COMP",
+      "grade": "B",
+      "score": 255,
+      "status": "closed",
+      "entry_price": 34870.0,
+      "current_price": 34700.0,
+      "tp_price": 36613.5,
+      "sl_price": 33475.2,
+      "take_profit_rate": 0.05,
+      "stop_loss_rate": 0.04,
+      "recommended_at": "2026-05-09 15:27:54 KST",
+      "expire_at": "2026-05-11 15:27:54 KST",
+      "signal_candle_start": "2026-05-09 09:00:00 KST",
+      "signal_candle_end": "2026-05-09 13:00:00 KST",
+      "max_profit_rate": 0.0,
+      "min_profit_rate": -0.03900200745626614,
+      "current_profit_rate": -0.004875250932033226,
+      "notice_flags": {
+        "near_sl": true
+      },
+      "raw": {
+        "trade_value": 360019230.9305964,
+        "volume_ratio": 2.868519804599638,
+        "candle_change": 2.7401296405421327,
+        "change_3": 5.955636584624724,
+        "stoch_k": 65.21827481259231,
+        "stoch_d": 40.12153574308072,
+        "mid_k": 49.79898160535979,
+        "ma20_gap": 1.9411799099573246,
+        "close_position": 0.9724770642201835,
+        "upper_wick": 0.027522935779816515
+      },
+      "last_checked_at": "2026-05-11 18:51:44 KST",
+      "result": "EXPIRED",
+      "closed_at": "2026-05-11 18:51:44 KST",
+      "final_price": 34700.0,
+      "final_profit_rate": -0.004875250932033226
     }
   ]
 }
