@@ -6,7 +6,7 @@
       "score": 255,
       "status": "active",
       "entry_price": 16.8,
-      "current_price": 17.2,
+      "current_price": 17.0,
       "tp_price": 17.64,
       "sl_price": 16.128,
       "take_profit_rate": 0.05,
@@ -17,7 +17,7 @@
       "signal_candle_end": "2026-05-12 13:00:00 KST",
       "max_profit_rate": 0.029761904761904656,
       "min_profit_rate": -0.017857142857142905,
-      "current_profit_rate": 0.023809523809523725,
+      "current_profit_rate": 0.011904761904761862,
       "notice_flags": {
         "profit_2": true
       },
@@ -33,7 +33,7 @@
         "close_position": 1.0,
         "upper_wick": 0.0
       },
-      "last_checked_at": "2026-05-13 00:24:25 KST"
+      "last_checked_at": "2026-05-13 02:34:37 KST"
     }
   ],
   "closed": [
