@@ -6,7 +6,7 @@
       "score": 285,
       "status": "active",
       "entry_price": 83.2,
-      "current_price": 80.5,
+      "current_price": 80.0,
       "tp_price": 87.36000000000001,
       "sl_price": 79.872,
       "take_profit_rate": 0.05,
@@ -17,7 +17,7 @@
       "signal_candle_end": "2026-05-12 13:00:00 KST",
       "max_profit_rate": 0.009615384615384581,
       "min_profit_rate": -0.03966346153846145,
-      "current_profit_rate": -0.03245192307692313,
+      "current_profit_rate": -0.03846153846153855,
       "notice_flags": {
         "near_sl": true
       },
@@ -33,7 +33,7 @@
         "close_position": 0.8392857142857156,
         "upper_wick": 0.16071428571428437
       },
-      "last_checked_at": "2026-05-12 19:05:57 KST"
+      "last_checked_at": "2026-05-12 19:40:06 KST"
     },
     {
       "market": "KRW-MANTRA",
@@ -68,7 +68,39 @@
         "close_position": 1.0,
         "upper_wick": 0.0
       },
-      "last_checked_at": "2026-05-12 19:05:57 KST"
+      "last_checked_at": "2026-05-12 19:40:06 KST"
+    },
+    {
+      "market": "KRW-WCT",
+      "grade": "B",
+      "score": 265,
+      "status": "active",
+      "entry_price": 112.0,
+      "current_price": 109.0,
+      "tp_price": 117.60000000000001,
+      "sl_price": 107.52,
+      "take_profit_rate": 0.05,
+      "stop_loss_rate": 0.04,
+      "recommended_at": "2026-05-12 19:42:26 KST",
+      "expire_at": "2026-05-14 19:42:26 KST",
+      "signal_candle_start": "2026-05-12 13:00:00 KST",
+      "signal_candle_end": "2026-05-12 17:00:00 KST",
+      "max_profit_rate": 0.0,
+      "min_profit_rate": 0.0,
+      "current_profit_rate": 0.0,
+      "notice_flags": {},
+      "raw": {
+        "trade_value": 1003671791.6967522,
+        "volume_ratio": 3.495734246428578,
+        "candle_change": 5.660377358490565,
+        "change_3": 7.692307692307687,
+        "stoch_k": 83.16939890710385,
+        "stoch_d": 63.86039886039888,
+        "mid_k": 58.75006940973961,
+        "ma20_gap": 6.972301814708692,
+        "close_position": 0.8571428571428571,
+        "upper_wick": 0.14285714285714285
+      }
     }
   ],
   "closed": [
