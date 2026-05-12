@@ -6,7 +6,7 @@
       "score": 285,
       "status": "active",
       "entry_price": 83.2,
-      "current_price": 80.0,
+      "current_price": 80.6,
       "tp_price": 87.36000000000001,
       "sl_price": 79.872,
       "take_profit_rate": 0.05,
@@ -17,7 +17,7 @@
       "signal_candle_end": "2026-05-12 13:00:00 KST",
       "max_profit_rate": 0.009615384615384581,
       "min_profit_rate": -0.03966346153846145,
-      "current_profit_rate": -0.03846153846153855,
+      "current_profit_rate": -0.03125000000000011,
       "notice_flags": {
         "near_sl": true
       },
@@ -33,7 +33,7 @@
         "close_position": 0.8392857142857156,
         "upper_wick": 0.16071428571428437
       },
-      "last_checked_at": "2026-05-12 19:40:06 KST"
+      "last_checked_at": "2026-05-12 21:25:45 KST"
     },
     {
       "market": "KRW-MANTRA",
@@ -41,7 +41,7 @@
       "score": 255,
       "status": "active",
       "entry_price": 16.8,
-      "current_price": 17.2,
+      "current_price": 17.3,
       "tp_price": 17.64,
       "sl_price": 16.128,
       "take_profit_rate": 0.05,
@@ -50,9 +50,9 @@
       "expire_at": "2026-05-14 13:03:56 KST",
       "signal_candle_start": "2026-05-12 09:00:00 KST",
       "signal_candle_end": "2026-05-12 13:00:00 KST",
-      "max_profit_rate": 0.023809523809523725,
+      "max_profit_rate": 0.029761904761904656,
       "min_profit_rate": -0.017857142857142905,
-      "current_profit_rate": 0.023809523809523725,
+      "current_profit_rate": 0.029761904761904656,
       "notice_flags": {
         "profit_2": true
       },
@@ -68,7 +68,7 @@
         "close_position": 1.0,
         "upper_wick": 0.0
       },
-      "last_checked_at": "2026-05-12 19:40:06 KST"
+      "last_checked_at": "2026-05-12 21:25:45 KST"
     },
     {
       "market": "KRW-WCT",
@@ -76,7 +76,7 @@
       "score": 265,
       "status": "active",
       "entry_price": 112.0,
-      "current_price": 109.0,
+      "current_price": 110.0,
       "tp_price": 117.60000000000001,
       "sl_price": 107.52,
       "take_profit_rate": 0.05,
@@ -86,8 +86,8 @@
       "signal_candle_start": "2026-05-12 13:00:00 KST",
       "signal_candle_end": "2026-05-12 17:00:00 KST",
       "max_profit_rate": 0.0,
-      "min_profit_rate": 0.0,
-      "current_profit_rate": 0.0,
+      "min_profit_rate": -0.017857142857142905,
+      "current_profit_rate": -0.017857142857142905,
       "notice_flags": {},
       "raw": {
         "trade_value": 1003671791.6967522,
@@ -100,7 +100,8 @@
         "ma20_gap": 6.972301814708692,
         "close_position": 0.8571428571428571,
         "upper_wick": 0.14285714285714285
-      }
+      },
+      "last_checked_at": "2026-05-12 21:25:45 KST"
     }
   ],
   "closed": [
