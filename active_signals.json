@@ -1,85 +1,12 @@
 {
   "active": [
     {
-      "market": "KRW-MANTRA",
-      "grade": "B",
-      "score": 255,
-      "status": "active",
-      "entry_price": 16.8,
-      "current_price": 16.3,
-      "tp_price": 17.64,
-      "sl_price": 16.128,
-      "take_profit_rate": 0.05,
-      "stop_loss_rate": 0.04,
-      "recommended_at": "2026-05-12 13:03:56 KST",
-      "expire_at": "2026-05-14 13:03:56 KST",
-      "signal_candle_start": "2026-05-12 09:00:00 KST",
-      "signal_candle_end": "2026-05-12 13:00:00 KST",
-      "max_profit_rate": 0.029761904761904656,
-      "min_profit_rate": -0.029761904761904767,
-      "current_profit_rate": -0.029761904761904767,
-      "notice_flags": {
-        "profit_2": true,
-        "drawdown_from_high": true,
-        "near_sl": true
-      },
-      "raw": {
-        "trade_value": 897333713.3096049,
-        "volume_ratio": 1.9194150708349766,
-        "candle_change": 3.70370370370372,
-        "change_3": 3.70370370370372,
-        "stoch_k": 64.16040100250638,
-        "stoch_d": 42.38626870205825,
-        "mid_k": 49.1247882552232,
-        "ma20_gap": 3.9925719591457964,
-        "close_position": 1.0,
-        "upper_wick": 0.0
-      },
-      "last_checked_at": "2026-05-13 22:37:15 KST"
-    },
-    {
-      "market": "KRW-SOON",
-      "grade": "B",
-      "score": 275,
-      "status": "active",
-      "entry_price": 269.0,
-      "current_price": 264.0,
-      "tp_price": 282.45,
-      "sl_price": 258.24,
-      "take_profit_rate": 0.05,
-      "stop_loss_rate": 0.04,
-      "recommended_at": "2026-05-13 03:12:29 KST",
-      "expire_at": "2026-05-15 03:12:29 KST",
-      "signal_candle_start": "2026-05-12 21:00:00 KST",
-      "signal_candle_end": "2026-05-13 01:00:00 KST",
-      "max_profit_rate": 0.029739776951672958,
-      "min_profit_rate": -0.018587360594795488,
-      "current_profit_rate": -0.018587360594795488,
-      "notice_flags": {
-        "profit_2": true,
-        "drawdown_from_high": true
-      },
-      "raw": {
-        "trade_value": 1027200261.4062327,
-        "volume_ratio": 3.3062067315559953,
-        "candle_change": 3.8610038610038533,
-        "change_3": 7.17131474103585,
-        "stoch_k": 84.22453248736552,
-        "stoch_d": 58.58249135395493,
-        "mid_k": 44.860853227232525,
-        "ma20_gap": 2.907421576128555,
-        "close_position": 0.9230769230769231,
-        "upper_wick": 0.07692307692307693
-      },
-      "last_checked_at": "2026-05-13 22:37:15 KST"
-    },
-    {
       "market": "KRW-STX",
       "grade": "B",
       "score": 265,
       "status": "active",
       "entry_price": 421.0,
-      "current_price": 417.0,
+      "current_price": 421.0,
       "tp_price": 442.05,
       "sl_price": 404.15999999999997,
       "take_profit_rate": 0.05,
@@ -90,7 +17,7 @@
       "signal_candle_end": "2026-05-13 13:00:00 KST",
       "max_profit_rate": 0.0213776722090262,
       "min_profit_rate": -0.01187648456057011,
-      "current_profit_rate": -0.009501187648456089,
+      "current_profit_rate": 0.0,
       "notice_flags": {
         "profit_2": true,
         "drawdown_from_high": true
@@ -107,7 +34,7 @@
         "close_position": 1.0,
         "upper_wick": 0.0
       },
-      "last_checked_at": "2026-05-13 22:37:15 KST"
+      "last_checked_at": "2026-05-13 23:55:31 KST"
     }
   ],
   "closed": [
@@ -735,6 +662,87 @@
       "closed_at": "2026-05-13 22:37:13 KST",
       "final_price": 24.3,
       "final_profit_rate": -0.04705882352941171
+    },
+    {
+      "market": "KRW-MANTRA",
+      "grade": "B",
+      "score": 255,
+      "status": "closed",
+      "entry_price": 16.8,
+      "current_price": 16.1,
+      "tp_price": 17.64,
+      "sl_price": 16.128,
+      "take_profit_rate": 0.05,
+      "stop_loss_rate": 0.04,
+      "recommended_at": "2026-05-12 13:03:56 KST",
+      "expire_at": "2026-05-14 13:03:56 KST",
+      "signal_candle_start": "2026-05-12 09:00:00 KST",
+      "signal_candle_end": "2026-05-12 13:00:00 KST",
+      "max_profit_rate": 0.029761904761904656,
+      "min_profit_rate": -0.04166666666666663,
+      "current_profit_rate": -0.04166666666666663,
+      "notice_flags": {
+        "profit_2": true,
+        "drawdown_from_high": true,
+        "near_sl": true
+      },
+      "raw": {
+        "trade_value": 897333713.3096049,
+        "volume_ratio": 1.9194150708349766,
+        "candle_change": 3.70370370370372,
+        "change_3": 3.70370370370372,
+        "stoch_k": 64.16040100250638,
+        "stoch_d": 42.38626870205825,
+        "mid_k": 49.1247882552232,
+        "ma20_gap": 3.9925719591457964,
+        "close_position": 1.0,
+        "upper_wick": 0.0
+      },
+      "last_checked_at": "2026-05-13 23:55:29 KST",
+      "result": "SL",
+      "closed_at": "2026-05-13 23:55:29 KST",
+      "final_price": 16.1,
+      "final_profit_rate": -0.04166666666666663
+    },
+    {
+      "market": "KRW-SOON",
+      "grade": "B",
+      "score": 275,
+      "status": "closed",
+      "entry_price": 269.0,
+      "current_price": 257.0,
+      "tp_price": 282.45,
+      "sl_price": 258.24,
+      "take_profit_rate": 0.05,
+      "stop_loss_rate": 0.04,
+      "recommended_at": "2026-05-13 03:12:29 KST",
+      "expire_at": "2026-05-15 03:12:29 KST",
+      "signal_candle_start": "2026-05-12 21:00:00 KST",
+      "signal_candle_end": "2026-05-13 01:00:00 KST",
+      "max_profit_rate": 0.029739776951672958,
+      "min_profit_rate": -0.044609665427509326,
+      "current_profit_rate": -0.044609665427509326,
+      "notice_flags": {
+        "profit_2": true,
+        "drawdown_from_high": true
+      },
+      "raw": {
+        "trade_value": 1027200261.4062327,
+        "volume_ratio": 3.3062067315559953,
+        "candle_change": 3.8610038610038533,
+        "change_3": 7.17131474103585,
+        "stoch_k": 84.22453248736552,
+        "stoch_d": 58.58249135395493,
+        "mid_k": 44.860853227232525,
+        "ma20_gap": 2.907421576128555,
+        "close_position": 0.9230769230769231,
+        "upper_wick": 0.07692307692307693
+      },
+      "last_checked_at": "2026-05-13 23:55:29 KST",
+      "result": "SL",
+      "closed_at": "2026-05-13 23:55:29 KST",
+      "final_price": 257.0,
+      "final_profit_rate": -0.044609665427509326
     }
   ]
 }
