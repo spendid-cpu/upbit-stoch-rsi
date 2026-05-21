@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-scanner.py — Upbit MTF 자동 스캐너 (v1.0)
-dashboard.py의 백그라운드 스레드에서 호출되거나 단독 실행 가능.
+scanner.py — Upbit MTF 자동 스캐너 (v1.1)
+변경사항:
+  - 스테이블코인 제외 전 종목 스캔 (SCAN_TARGET_COUNT 환경변수 무시)
+  - STABLE_COINS 집합으로 스테이블코인 필터링
+  - macro 정보를 scanner_state에 포함
 """
 
 import os
@@ -25,28 +28,36 @@ log = logging.getLogger(__name__)
 
 # ── 환경변수 ──────────────────────────────────────
 SCAN_INTERVAL_MIN   = int(os.environ.get('SCAN_INTERVAL_MIN', 60))
-SCAN_TARGET_COUNT   = int(os.environ.get('SCAN_TARGET_COUNT', 60))
-MIN_TRADE_VALUE_KRW = float(os.environ.get('MIN_TRADE_VALUE_KRW', 3_000_000_000))
+MIN_TRADE_VALUE_KRW = float(os.environ.get('MIN_TRADE_VALUE_KRW', 0))  # 0 = 제한 없음
 REQUEST_DELAY       = float(os.environ.get('REQUEST_DELAY', 0.12))
 MAX_WORKERS         = int(os.environ.get('MAX_WORKERS', 6))
 CANDLE_COUNT        = int(os.environ.get('CANDLE_COUNT', 200))
 WATCH_LIST_FILE     = os.environ.get('WATCH_LIST_FILE', 'watch_list.json')
 SIGNAL_HISTORY_FILE = os.environ.get('SIGNAL_HISTORY_FILE', 'signal_history.json')
 
-TELEGRAM_TOKEN  = os.environ.get('TELEGRAM_BOT_TOKEN', '')
-TELEGRAM_CHAT   = os.environ.get('TELEGRAM_CHAT_ID', '')
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+TELEGRAM_CHAT  = os.environ.get('TELEGRAM_CHAT_ID', '')
 
-# ── 공유 상태 (dashboard.py에서 읽음) ────────────
-_state_lock = threading.Lock()
+# ── 스테이블코인 제외 목록 ─────────────────────────
+STABLE_COINS = {
+    'KRW-USDT', 'KRW-USDC', 'KRW-BUSD', 'KRW-DAI',
+    'KRW-TUSD', 'KRW-USDP', 'KRW-GUSD', 'KRW-FRAX',
+    'KRW-USDD', 'KRW-FDUSD', 'KRW-PYUSD',
+}
+
+# ── 공유 상태 ─────────────────────────────────────
+_state_lock  = threading.Lock()
 scanner_state = {
-    'status'       : 'idle',       # idle | scanning | done | error
+    'status'       : 'idle',
     'last_scan_at' : None,
     'next_scan_at' : None,
     'scan_count'   : 0,
-    'watch_list'   : [],           # 현재 Watch List
-    'new_entries'  : [],           # 이번 스캔에서 신규 등록된 종목
-    'entry_signals': [],           # 진입 트리거 발동 종목
-    'removed'      : [],           # 이번 스캔에서 제거된 종목
+    'watch_list'   : [],
+    'new_entries'  : [],
+    'entry_signals': [],
+    'removed'      : [],
+    'macro'        : {},   # ← 매크로 정보 추가
+    'total_scanned': 0,    # ← 이번 스캔 종목 수
     'error'        : None,
 }
 
@@ -62,31 +73,25 @@ def _get(url, params=None, retry=3):
                 raise
             time.sleep(0.5 * (i + 1))
 
-def get_krw_markets():
+def get_all_krw_markets():
+    """스테이블코인·BTC 제외 전체 KRW 마켓 반환."""
     data = _get('https://api.upbit.com/v1/market/all', {'isDetails': 'true'})
-    return [
-        d['market'] for d in data
-        if d['market'].startswith('KRW-')
-        and d.get('market_warning', 'NONE') == 'NONE'
-        and d['market'] not in ('KRW-BTC', 'KRW-USDT')
-    ]
-
-def get_top_markets(limit=60):
-    markets = get_krw_markets()
-    chunks  = [markets[i:i+100] for i in range(0, len(markets), 100)]
-    tickers = []
-    for chunk in chunks:
-        data = _get('https://api.upbit.com/v1/ticker',
-                    {'markets': ','.join(chunk)})
-        tickers.extend(data)
-        time.sleep(REQUEST_DELAY)
-    tickers = [t for t in tickers
-               if t.get('acc_trade_price_24h', 0) >= MIN_TRADE_VALUE_KRW]
-    tickers.sort(key=lambda x: x['acc_trade_price_24h'], reverse=True)
-    return [t['market'] for t in tickers[:limit]]
+    markets = []
+    for d in data:
+        market = d['market']
+        if not market.startswith('KRW-'):
+            continue
+        if market in STABLE_COINS:
+            continue
+        if market == 'KRW-BTC':
+            continue
+        if d.get('market_warning', 'NONE') != 'NONE':
+            continue
+        markets.append(market)
+    log.info(f'전체 스캔 대상: {len(markets)}개 (스테이블·BTC 제외)')
+    return markets
 
 def get_closes(ticker, interval, count=200):
-    """종가 리스트만 반환."""
     try:
         url_map = {
             'day'     : 'https://api.upbit.com/v1/candles/days',
@@ -94,11 +99,10 @@ def get_closes(ticker, interval, count=200):
             'minutes4': 'https://api.upbit.com/v1/candles/minutes/240',
             'minutes1': 'https://api.upbit.com/v1/candles/minutes/60',
         }
-        url = url_map.get(interval)
+        url  = url_map.get(interval)
         if not url:
             return []
         data = _get(url, {'market': ticker, 'count': count})
-        # Upbit API는 최신 → 과거 순으로 반환 → 역순 정렬
         data.sort(key=lambda x: x['candle_date_time_utc'])
         return [float(c['trade_price']) for c in data]
     except Exception as e:
@@ -106,7 +110,6 @@ def get_closes(ticker, interval, count=200):
         return []
 
 def get_btc_closes():
-    """BTC 일봉·주봉 종가 반환."""
     daily  = get_closes('KRW-BTC', 'day',  count=60)
     time.sleep(REQUEST_DELAY)
     weekly = get_closes('KRW-BTC', 'week', count=30)
@@ -135,7 +138,7 @@ def append_signal_history(record):
         except Exception:
             history = []
     history.append(record)
-    history = history[-500:]  # 최대 500개 보관
+    history = history[-500:]
     with open(SIGNAL_HISTORY_FILE, 'w', encoding='utf-8') as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
@@ -143,14 +146,14 @@ def append_signal_history(record):
 def send_telegram(text):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
         return
-    url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
+    url     = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
     MAX_LEN = 4000
-    chunks = [text[i:i+MAX_LEN] for i in range(0, len(text), MAX_LEN)]
+    chunks  = [text[i:i+MAX_LEN] for i in range(0, len(text), MAX_LEN)]
     for chunk in chunks:
         try:
             requests.post(url, json={
-                'chat_id': TELEGRAM_CHAT,
-                'text': chunk,
+                'chat_id'   : TELEGRAM_CHAT,
+                'text'      : chunk,
                 'parse_mode': 'HTML'
             }, timeout=10)
         except Exception as e:
@@ -159,13 +162,12 @@ def send_telegram(text):
 def build_new_entry_msg(items, macro_state):
     lines = [f'📋 <b>Watch List 신규 등록 {len(items)}개</b>']
     macro_icon = '✅' if macro_state['safe'] else '🚫'
-    lines.append(f'매크로({macro_icon}): {macro_state["reason"]}')
+    w_dist = macro_state.get('weekly_distance_pct', 0) or 0
+    d_dist = macro_state.get('daily_distance_pct', 0) or 0
+    lines.append(f'BTC 주봉MA20({macro_icon}): {w_dist:+.2f}% | 일봉MA20(참고): {d_dist:+.2f}%')
     lines.append('')
     for item in items:
-        lines.append(
-            f'• <b>{item["ticker"]}</b>  '
-            f'일봉단기K {item["daily_short_k"]:.1f}'
-        )
+        lines.append(f'• <b>{item["ticker"]}</b>  일봉단기K {item["daily_short_k"]:.1f}')
     return '\n'.join(lines)
 
 def build_entry_signal_msg(items):
@@ -183,21 +185,15 @@ def build_entry_signal_msg(items):
     return '\n'.join(lines)
 
 # ===================== 단일 종목 분석 =====================
-def analyze_ticker(ticker, btc_macro, watch_list_map):
-    """
-    한 종목 분석.
-    Returns: dict { ticker, watch_result, entry_result, daily_k, status }
-    """
+def analyze_ticker(ticker, watch_list_map):
     try:
-        daily = get_closes(ticker, 'day',   count=CANDLE_COUNT)
+        daily = get_closes(ticker, 'day', count=CANDLE_COUNT)
         time.sleep(REQUEST_DELAY)
-
         if len(daily) < 60:
             return None
 
         watch_result = mtf_setup.evaluate_watch_list_entry(daily, ticker)
 
-        # 진입 트리거는 Watch List에 있는 종목만
         entry_result = None
         if ticker in watch_list_map or watch_result['should_register']:
             h4 = get_closes(ticker, 'minutes4', count=CANDLE_COUNT)
@@ -207,53 +203,47 @@ def analyze_ticker(ticker, btc_macro, watch_list_map):
             entry_result = mtf_setup.evaluate_entry_trigger(h4, h1, ticker)
 
         return {
-            'ticker'      : ticker,
-            'watch_result': watch_result,
-            'entry_result': entry_result,
+            'ticker'       : ticker,
+            'watch_result' : watch_result,
+            'entry_result' : entry_result,
             'daily_short_k': watch_result.get('daily_short_k'),
         }
     except Exception as e:
         log.debug(f'{ticker} 분석 오류: {e}')
         return None
 
-# ===================== 메인 스캔 루프 =====================
+# ===================== 메인 스캔 =====================
 def run_scan():
-    """한 번의 전체 스캔 실행."""
     now_utc = datetime.now(timezone.utc)
     log.info(f'=== 스캔 시작 {now_utc.strftime("%Y-%m-%d %H:%M UTC")} ===')
 
     with _state_lock:
-        scanner_state['status']    = 'scanning'
-        scanner_state['error']     = None
-        scanner_state['new_entries']   = []
-        scanner_state['entry_signals'] = []
-        scanner_state['removed']       = []
+        scanner_state['status']       = 'scanning'
+        scanner_state['error']        = None
+        scanner_state['new_entries']  = []
+        scanner_state['entry_signals']= []
+        scanner_state['removed']      = []
 
     try:
-        # 1) BTC 매크로 필터
+        # 1) BTC 매크로 (주봉 MA20 기준)
         btc_daily, btc_weekly = get_btc_closes()
-        macro = mtf_setup.evaluate_macro_filter(
-            btc_daily, btc_weekly, ticker='BTC'
-        )
-        log.info(f'매크로: {macro["reason"]}')
+        macro = mtf_setup.evaluate_macro_filter(btc_daily, btc_weekly, ticker='BTC')
+        w_dist = macro.get('weekly_distance_pct', 0) or 0
+        d_dist = macro.get('daily_distance_pct', 0) or 0
+        log.info(f'매크로: safe={macro["safe"]} | 주봉MA20 {w_dist:+.2f}% | 일봉MA20 {d_dist:+.2f}% (참고)')
 
-        # 2) Watch List 불러오기
-        watch_list = load_watch_list()
+        # 2) Watch List
+        watch_list     = load_watch_list()
         watch_list_map = {w['ticker']: w for w in watch_list}
 
-        # 3) 스캔 대상 종목 가져오기
-        targets = get_top_markets(limit=SCAN_TARGET_COUNT)
-        log.info(f'스캔 대상: {len(targets)}개')
+        # 3) 전 종목 스캔
+        targets = get_all_krw_markets()
 
         # 4) 병렬 분석
-        new_entries    = []
-        entry_signals  = []
-        removed_list   = []
-        results        = []
-
+        results = []
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             futures = {
-                pool.submit(analyze_ticker, t, macro, watch_list_map): t
+                pool.submit(analyze_ticker, t, watch_list_map): t
                 for t in targets
             }
             for future in as_completed(futures):
@@ -261,13 +251,12 @@ def run_scan():
                 if r:
                     results.append(r)
 
-        # 5) Watch List 무효화 처리 (스캔 대상에 없는 종목도 포함)
-        results_map = {r['ticker']: r for r in results}
+        # 5) Watch List 무효화
         new_watch_list = []
+        removed_list   = []
         for item in watch_list:
             ticker = item['ticker']
-            # 무효화 판정
-            daily = get_closes(ticker, 'day', count=CANDLE_COUNT)
+            daily  = get_closes(ticker, 'day', count=CANDLE_COUNT)
             time.sleep(REQUEST_DELAY)
             inv = mtf_setup.evaluate_watch_invalidation(daily, item, ticker)
             if inv['should_remove']:
@@ -281,44 +270,45 @@ def run_scan():
             else:
                 new_watch_list.append(item)
 
-        # 6) 신규 Watch List 등록
+        # 6) 신규 등록
+        new_entries      = []
         existing_tickers = {w['ticker'] for w in new_watch_list}
         for r in results:
-            wr = r['watch_result']
+            wr     = r['watch_result']
             ticker = r['ticker']
             if wr['should_register'] and ticker not in existing_tickers:
-                # 매크로 필터 통과 시에만 등록
                 if mtf_setup.USE_MACRO_FILTER and not macro['safe']:
-                    log.info(f'Watch 등록 보류(매크로 차단): {ticker}')
+                    log.info(f'Watch 보류(매크로 차단): {ticker}')
                     continue
                 entry = {
-                    'ticker'        : ticker,
-                    'registered_at' : now_utc.isoformat(),
-                    'daily_short_k' : wr['daily_short_k'],
-                    'reason'        : wr['reason'],
+                    'ticker'       : ticker,
+                    'registered_at': now_utc.isoformat(),
+                    'daily_short_k': wr['daily_short_k'],
+                    'reason'       : wr['reason'],
                 }
                 new_watch_list.append(entry)
                 new_entries.append(entry)
                 existing_tickers.add(ticker)
                 log.info(f'Watch 등록: {ticker} K={wr["daily_short_k"]:.1f}')
 
-        # 7) 진입 트리거 체크
+        # 7) 진입 트리거
+        entry_signals = []
         for r in results:
             er = r.get('entry_result')
             if er and er['should_enter']:
                 signal = {
-                    'ticker'     : r['ticker'],
+                    'ticker'      : r['ticker'],
                     'triggered_at': now_utc.isoformat(),
-                    'trigger'    : er,
+                    'trigger'     : er,
                 }
                 entry_signals.append(signal)
                 append_signal_history(signal)
                 log.info(f'진입 신호: {r["ticker"]} — {er["reason"]}')
 
-        # 8) Watch List 저장
+        # 8) 저장
         save_watch_list(new_watch_list)
 
-        # 9) 텔레그램 알림
+        # 9) 텔레그램
         if new_entries:
             send_telegram(build_new_entry_msg(new_entries, macro))
         if entry_signals:
@@ -326,15 +316,19 @@ def run_scan():
 
         # 10) 상태 업데이트
         with _state_lock:
-            scanner_state['status']        = 'done'
-            scanner_state['last_scan_at']  = now_utc.isoformat()
-            scanner_state['scan_count']   += 1
-            scanner_state['watch_list']    = new_watch_list
-            scanner_state['new_entries']   = new_entries
-            scanner_state['entry_signals'] = entry_signals
-            scanner_state['removed']       = removed_list
+            scanner_state.update({
+                'status'       : 'done',
+                'last_scan_at' : now_utc.isoformat(),
+                'scan_count'   : scanner_state['scan_count'] + 1,
+                'watch_list'   : new_watch_list,
+                'new_entries'  : new_entries,
+                'entry_signals': entry_signals,
+                'removed'      : removed_list,
+                'macro'        : macro,
+                'total_scanned': len(targets),
+            })
 
-        log.info(f'스캔 완료 | Watch {len(new_watch_list)}개 | '
+        log.info(f'스캔 완료 | 대상 {len(targets)}개 | Watch {len(new_watch_list)}개 | '
                  f'신규 {len(new_entries)}개 | 진입 {len(entry_signals)}개')
 
     except Exception as e:
@@ -345,7 +339,6 @@ def run_scan():
 
 
 def scanner_loop():
-    """백그라운드 스캔 루프 (dashboard.py에서 스레드로 실행)."""
     while True:
         run_scan()
         next_at = datetime.now(timezone.utc).timestamp() + SCAN_INTERVAL_MIN * 60
@@ -357,6 +350,5 @@ def scanner_loop():
         time.sleep(SCAN_INTERVAL_MIN * 60)
 
 
-# 단독 실행 시
 if __name__ == '__main__':
     run_scan()
