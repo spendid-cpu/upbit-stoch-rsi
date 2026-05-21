@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-scanner.py — Upbit MTF 자동 스캐너 (v1.2)
+scanner.py — Upbit MTF 자동 스캐너 (v1.4)
 변경사항:
-  - USDE(Ethena) 스테이블코인 추가
-  - Watch 등록 시 entry_price(등록 당시 가격) 저장
-  - analyze_ticker에서 Stoch RSI K/D 시계열 저장 (차트용)
-  - get_current_prices() 현재가 일괄 조회
-  - manual_scan() 수동 스캔 트리거
+  - TP/SL/타임아웃 트레이드 모니터링 추가
+  - active_trades.json: 활성 포지션 관리
+  - trade_history.json: 청산 기록 + 승률 계산
+  - TP=+5%, SL=-3%, 타임아웃=48H (환경변수로 조정 가능)
+  - entry_price 최초 1회만 저장 (덮어쓰기 금지)
 """
 
 import os
@@ -34,25 +34,30 @@ MIN_TRADE_VALUE_KRW = float(os.environ.get('MIN_TRADE_VALUE_KRW', 0))
 REQUEST_DELAY       = float(os.environ.get('REQUEST_DELAY', 0.12))
 MAX_WORKERS         = int(os.environ.get('MAX_WORKERS', 6))
 CANDLE_COUNT        = int(os.environ.get('CANDLE_COUNT', 200))
-WATCH_LIST_FILE     = os.environ.get('WATCH_LIST_FILE', 'watch_list.json')
+WATCH_LIST_FILE     = os.environ.get('WATCH_LIST_FILE',     'watch_list.json')
 SIGNAL_HISTORY_FILE = os.environ.get('SIGNAL_HISTORY_FILE', 'signal_history.json')
+ACTIVE_TRADES_FILE  = os.environ.get('ACTIVE_TRADES_FILE',  'active_trades.json')
+TRADE_HISTORY_FILE  = os.environ.get('TRADE_HISTORY_FILE',  'trade_history.json')
+
+# ── TP/SL/타임아웃 설정 ────────────────────────────
+TRADE_TP_PCT      = float(os.environ.get('TRADE_TP_PCT',      5.0))   # +5%
+TRADE_SL_PCT      = float(os.environ.get('TRADE_SL_PCT',      3.0))   # -3%
+TRADE_TIMEOUT_H   = float(os.environ.get('TRADE_TIMEOUT_H',   48.0))  # 48시간
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
-TELEGRAM_CHAT  = os.environ.get('TELEGRAM_CHAT_ID', '')
+TELEGRAM_CHAT  = os.environ.get('TELEGRAM_CHAT_ID',   '')
 
 # ── 스테이블코인 제외 목록 ─────────────────────────
 STABLE_COINS = {
     'KRW-USDT', 'KRW-USDC', 'KRW-BUSD', 'KRW-DAI',
     'KRW-TUSD', 'KRW-USDP', 'KRW-GUSD', 'KRW-FRAX',
     'KRW-USDD', 'KRW-FDUSD', 'KRW-PYUSD',
-    'KRW-USDE',   # Ethena USDe
-    'KRW-USDS',   # USDS
-    'KRW-USD0',   # USD0
+    'KRW-USDE', 'KRW-USDS', 'KRW-USD0',
 }
 
 # ── 공유 상태 ─────────────────────────────────────
 _state_lock   = threading.Lock()
-_manual_event = threading.Event()  # 수동 스캔 트리거
+_manual_event = threading.Event()
 
 scanner_state = {
     'status'        : 'idle',
@@ -65,8 +70,13 @@ scanner_state = {
     'removed'       : [],
     'macro'         : {},
     'total_scanned' : 0,
-    'current_prices': {},   # { ticker: {price, change_pct} }
-    'chart_data'    : {},   # { ticker: {daily_k, daily_d, h4_k, h4_d, h1_k, h1_d} }
+    'current_prices': {},
+    'chart_data'    : {},
+    # TP/SL 모니터링
+    'active_trades' : [],   # 현재 활성 포지션
+    'closed_trades' : [],   # 이번 스캔에서 청산된 포지션
+    'win_rate'      : None, # 전체 승률 (%)
+    'trade_stats'   : {},   # { total, win, loss, timeout, avg_pnl }
     'error'         : None,
 }
 
@@ -83,7 +93,6 @@ def _get(url, params=None, retry=3):
             time.sleep(0.5 * (i + 1))
 
 def get_all_krw_markets():
-    """스테이블코인·BTC 제외 전체 KRW 마켓 반환."""
     data = _get('https://api.upbit.com/v1/market/all', {'isDetails': 'true'})
     markets = []
     for d in data:
@@ -97,7 +106,7 @@ def get_all_krw_markets():
         if d.get('market_warning', 'NONE') != 'NONE':
             continue
         markets.append(market)
-    log.info(f'전체 스캔 대상: {len(markets)}개 (스테이블·BTC 제외)')
+    log.info(f'전체 스캔 대상: {len(markets)}개')
     return markets
 
 def get_closes(ticker, interval, count=200):
@@ -108,7 +117,7 @@ def get_closes(ticker, interval, count=200):
             'minutes4': 'https://api.upbit.com/v1/candles/minutes/240',
             'minutes1': 'https://api.upbit.com/v1/candles/minutes/60',
         }
-        url  = url_map.get(interval)
+        url = url_map.get(interval)
         if not url:
             return []
         data = _get(url, {'market': ticker, 'count': count})
@@ -125,10 +134,6 @@ def get_btc_closes():
     return daily, weekly
 
 def get_current_prices(tickers):
-    """
-    여러 종목의 현재가·등락률 일괄 조회.
-    Returns: { ticker: {'price': float, 'change_pct': float} }
-    """
     if not tickers:
         return {}
     result = {}
@@ -139,15 +144,15 @@ def get_current_prices(tickers):
                         {'markets': ','.join(chunk)})
             for d in data:
                 result[d['market']] = {
-                    'price'      : d.get('trade_price', 0),
-                    'change_pct' : d.get('signed_change_rate', 0) * 100,
+                    'price'     : d.get('trade_price', 0),
+                    'change_pct': d.get('signed_change_rate', 0) * 100,
                 }
             time.sleep(REQUEST_DELAY)
         except Exception as e:
             log.debug(f'현재가 조회 오류: {e}')
     return result
 
-# ===================== Watch List I/O =====================
+# ===================== 파일 I/O =====================
 def load_watch_list():
     if not os.path.exists(WATCH_LIST_FILE):
         return []
@@ -157,9 +162,9 @@ def load_watch_list():
     except Exception:
         return []
 
-def save_watch_list(watch_list):
+def save_watch_list(wl):
     with open(WATCH_LIST_FILE, 'w', encoding='utf-8') as f:
-        json.dump(watch_list, f, ensure_ascii=False, indent=2)
+        json.dump(wl, f, ensure_ascii=False, indent=2)
 
 def load_signal_history():
     if not os.path.exists(SIGNAL_HISTORY_FILE):
@@ -177,54 +182,209 @@ def append_signal_history(record):
     with open(SIGNAL_HISTORY_FILE, 'w', encoding='utf-8') as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
+def load_active_trades():
+    if not os.path.exists(ACTIVE_TRADES_FILE):
+        return []
+    try:
+        with open(ACTIVE_TRADES_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_active_trades(trades):
+    with open(ACTIVE_TRADES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(trades, f, ensure_ascii=False, indent=2)
+
+def load_trade_history():
+    if not os.path.exists(TRADE_HISTORY_FILE):
+        return []
+    try:
+        with open(TRADE_HISTORY_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def append_trade_history(record):
+    history = load_trade_history()
+    history.append(record)
+    history = history[-1000:]
+    with open(TRADE_HISTORY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+# ===================== 승률 계산 =====================
+def calc_trade_stats():
+    """
+    trade_history.json 기반 승률·통계 계산.
+    Returns: { total, win, loss, timeout, win_rate, avg_pnl, best_pnl, worst_pnl }
+    """
+    history = load_trade_history()
+    if not history:
+        return {
+            'total': 0, 'win': 0, 'loss': 0, 'timeout': 0,
+            'win_rate': None, 'avg_pnl': None,
+            'best_pnl': None, 'worst_pnl': None,
+        }
+
+    total   = len(history)
+    win     = sum(1 for h in history if h.get('result') == 'TP')
+    loss    = sum(1 for h in history if h.get('result') == 'SL')
+    timeout = sum(1 for h in history if h.get('result') == 'TIMEOUT')
+    pnls    = [h.get('pnl_pct', 0) for h in history if h.get('pnl_pct') is not None]
+
+    return {
+        'total'    : total,
+        'win'      : win,
+        'loss'     : loss,
+        'timeout'  : timeout,
+        'win_rate' : round(win / total * 100, 1) if total > 0 else None,
+        'avg_pnl'  : round(sum(pnls) / len(pnls), 2) if pnls else None,
+        'best_pnl' : round(max(pnls), 2) if pnls else None,
+        'worst_pnl': round(min(pnls), 2) if pnls else None,
+    }
+
+# ===================== TP/SL 모니터링 =====================
+def check_active_trades(current_prices):
+    """
+    활성 트레이드 TP/SL/타임아웃 체크.
+    Returns: (remaining_trades, closed_trades)
+    """
+    trades   = load_active_trades()
+    now_utc  = datetime.now(timezone.utc)
+    remaining = []
+    closed    = []
+
+    for trade in trades:
+        ticker     = trade['ticker']
+        entry_px   = trade.get('entry_price')
+        entered_at = trade.get('entered_at')
+
+        if not entry_px or entry_px <= 0:
+            remaining.append(trade)
+            continue
+
+        # 현재가
+        cp = current_prices.get(ticker, {}).get('price')
+        if not cp:
+            remaining.append(trade)
+            continue
+
+        pnl_pct = (cp - entry_px) / entry_px * 100
+
+        # 경과 시간
+        hours_elapsed = 0
+        if entered_at:
+            try:
+                entered_dt = datetime.fromisoformat(entered_at)
+                if entered_dt.tzinfo is None:
+                    entered_dt = entered_dt.replace(tzinfo=timezone.utc)
+                hours_elapsed = (now_utc - entered_dt).total_seconds() / 3600
+            except Exception:
+                pass
+
+        # 청산 조건 판정
+        result = None
+        if pnl_pct >= TRADE_TP_PCT:
+            result = 'TP'
+        elif pnl_pct <= -TRADE_SL_PCT:
+            result = 'SL'
+        elif hours_elapsed >= TRADE_TIMEOUT_H:
+            result = 'TIMEOUT'
+
+        if result:
+            closed_record = {
+                **trade,
+                'result'       : result,
+                'exit_price'   : cp,
+                'pnl_pct'      : round(pnl_pct, 3),
+                'hours_held'   : round(hours_elapsed, 1),
+                'closed_at'    : now_utc.isoformat(),
+            }
+            closed.append(closed_record)
+            append_trade_history(closed_record)
+            log.info(
+                f'[{result}] {ticker} | '
+                f'진입 {fmt_price(entry_px)} → 현재 {fmt_price(cp)} | '
+                f'PnL {pnl_pct:+.2f}% | {hours_elapsed:.1f}h'
+            )
+            # 텔레그램 청산 알림
+            send_telegram(build_trade_close_msg(closed_record))
+        else:
+            # 현재 PnL 업데이트
+            trade['current_price'] = cp
+            trade['pnl_pct']       = round(pnl_pct, 3)
+            trade['hours_held']    = round(hours_elapsed, 1)
+            remaining.append(trade)
+
+    save_active_trades(remaining)
+    return remaining, closed
+
+def open_trade(signal, entry_price):
+    """진입 신호 발생 시 active_trades에 추가."""
+    now_utc = datetime.now(timezone.utc)
+    trade = {
+        'ticker'      : signal['ticker'],
+        'entered_at'  : now_utc.isoformat(),
+        'entry_price' : entry_price,
+        'tp_price'    : round(entry_price * (1 + TRADE_TP_PCT / 100), 6),
+        'sl_price'    : round(entry_price * (1 - TRADE_SL_PCT / 100), 6),
+        'timeout_at'  : datetime.fromtimestamp(
+                            now_utc.timestamp() + TRADE_TIMEOUT_H * 3600,
+                            tz=timezone.utc
+                        ).isoformat(),
+        'trigger'     : signal.get('trigger', {}),
+        'current_price': entry_price,
+        'pnl_pct'     : 0.0,
+        'hours_held'  : 0.0,
+    }
+    trades = load_active_trades()
+    # 동일 종목 중복 방지
+    if not any(t['ticker'] == signal['ticker'] for t in trades):
+        trades.append(trade)
+        save_active_trades(trades)
+        log.info(
+            f'트레이드 오픈: {signal["ticker"]} @ {fmt_price(entry_price)}원 | '
+            f'TP {fmt_price(trade["tp_price"])} / SL {fmt_price(trade["sl_price"])}'
+        )
+    return trade
+
 # ===================== 텔레그램 =====================
 def send_telegram(text):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
         return
     url     = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
     MAX_LEN = 4000
-    chunks  = [text[i:i+MAX_LEN] for i in range(0, len(text), MAX_LEN)]
-    for chunk in chunks:
+    for chunk in [text[i:i+MAX_LEN] for i in range(0, len(text), MAX_LEN)]:
         try:
             requests.post(url, json={
-                'chat_id'   : TELEGRAM_CHAT,
-                'text'      : chunk,
-                'parse_mode': 'HTML'
+                'chat_id': TELEGRAM_CHAT, 'text': chunk, 'parse_mode': 'HTML'
             }, timeout=10)
         except Exception as e:
-            log.warning(f'텔레그램 전송 오류: {e}')
+            log.warning(f'텔레그램 오류: {e}')
 
 def fmt_price(p):
-    """가격 포맷 (1원 미만은 소수점 표시)."""
-    if p is None:
-        return '—'
-    if p >= 100:
-        return f'{p:,.0f}'
-    elif p >= 1:
-        return f'{p:,.2f}'
-    else:
-        return f'{p:,.4f}'
+    if p is None: return '—'
+    if p >= 100:  return f'{p:,.0f}'
+    if p >= 1:    return f'{p:,.2f}'
+    return f'{p:,.4f}'
 
 def build_new_entry_msg(items, macro_state, prices):
     lines = [f'📋 <b>Watch List 신규 등록 {len(items)}개</b>']
-    macro_icon = '✅' if macro_state['safe'] else '🚫'
-    w_dist = macro_state.get('weekly_distance_pct', 0) or 0
-    d_dist = macro_state.get('daily_distance_pct',  0) or 0
-    lines.append(f'BTC 주봉MA20({macro_icon}): {w_dist:+.2f}% | 일봉MA20(참고): {d_dist:+.2f}%')
+    icon  = '✅' if macro_state['safe'] else '🚫'
+    w     = macro_state.get('weekly_distance_pct', 0) or 0
+    d     = macro_state.get('daily_distance_pct',  0) or 0
+    lines.append(f'BTC 주봉MA20({icon}): {w:+.2f}% | 일봉MA20: {d:+.2f}%')
     lines.append('')
     for item in items:
         t   = item['ticker']
         p   = prices.get(t, {})
         prc = fmt_price(p.get('price'))
         chg = p.get('change_pct', 0)
-        lines.append(
-            f'• <b>{t}</b>  일봉K {item["daily_short_k"]:.1f} | '
-            f'현재가 {prc}원 ({chg:+.2f}%)'
-        )
+        lines.append(f'• <b>{t}</b>  일봉K {item["daily_short_k"]:.1f} | {prc}원 ({chg:+.2f}%)')
     return '\n'.join(lines)
 
 def build_entry_signal_msg(items, prices):
     lines = [f'🚀 <b>진입 트리거 {len(items)}개</b>']
+    lines.append(f'TP +{TRADE_TP_PCT}% / SL -{TRADE_SL_PCT}% / 타임아웃 {TRADE_TIMEOUT_H:.0f}h')
     lines.append('')
     for item in items:
         t   = item['ticker']
@@ -232,15 +392,29 @@ def build_entry_signal_msg(items, prices):
         p   = prices.get(t, {})
         prc = fmt_price(p.get('price'))
         chg = p.get('change_pct', 0)
-        ep  = fmt_price(item.get('entry_price'))
+        ep  = item.get('entry_price')
+        tp  = fmt_price(ep * (1 + TRADE_TP_PCT / 100)) if ep else '—'
+        sl  = fmt_price(ep * (1 - TRADE_SL_PCT / 100)) if ep else '—'
         lines.append(
-            f'⚡ <b>{t}</b>  현재가 {prc}원 ({chg:+.2f}%)\n'
-            f'   4h K {tr["h4_short_k"]:.1f} | '
-            f'1h K {tr["h1_short_k"]:.1f} | '
-            f'{tr["h1_trigger_type"]}\n'
-            f'   Watch 등록가: {ep}원'
+            f'⚡ <b>{t}</b>  {prc}원 ({chg:+.2f}%)\n'
+            f'   4h K {tr["h4_short_k"]:.1f} | 1h K {tr["h1_short_k"]:.1f} | {tr["h1_trigger_type"]}\n'
+            f'   🎯 TP {tp} / 🛑 SL {sl}'
         )
     return '\n'.join(lines)
+
+def build_trade_close_msg(trade):
+    icons = {'TP': '🎯', 'SL': '🛑', 'TIMEOUT': '⏰'}
+    icon  = icons.get(trade['result'], '📌')
+    pnl   = trade.get('pnl_pct', 0)
+    pnl_icon = '▲' if pnl >= 0 else '▼'
+    stats = calc_trade_stats()
+    wr    = f"{stats['win_rate']:.1f}%" if stats['win_rate'] is not None else '—'
+    return (
+        f'{icon} <b>{trade["result"]} — {trade["ticker"]}</b>\n'
+        f'진입 {fmt_price(trade["entry_price"])}원 → 청산 {fmt_price(trade["exit_price"])}원\n'
+        f'{pnl_icon} PnL <b>{pnl:+.2f}%</b> | 보유 {trade["hours_held"]:.1f}h\n'
+        f'📊 누적 승률 {wr} ({stats["win"]}승 {stats["loss"]}패 {stats["timeout"]}타임아웃)'
+    )
 
 # ===================== 단일 종목 분석 =====================
 def analyze_ticker(ticker, watch_list_map):
@@ -250,9 +424,7 @@ def analyze_ticker(ticker, watch_list_map):
         if len(daily) < 60:
             return None
 
-        watch_result = mtf_setup.evaluate_watch_list_entry(daily, ticker)
-
-        # Stoch RSI 시계열 (차트용) — 최근 50개만
+        watch_result  = mtf_setup.evaluate_watch_list_entry(daily, ticker)
         daily_presets = mtf_setup.calc_all_presets(daily)
         chart = {
             'daily_k': daily_presets['short'].get('k_line', [])[-50:],
@@ -274,8 +446,7 @@ def analyze_ticker(ticker, watch_list_map):
             chart['h4_d'] = h4_presets['short'].get('d_line', [])[-50:]
             chart['h1_k'] = h1_presets['short'].get('k_line', [])[-50:]
             chart['h1_d'] = h1_presets['short'].get('d_line', [])[-50:]
-
-            entry_result = mtf_setup.evaluate_entry_trigger(h4, h1, ticker)
+            entry_result  = mtf_setup.evaluate_entry_trigger(h4, h1, ticker)
 
         return {
             'ticker'       : ticker,
@@ -283,15 +454,13 @@ def analyze_ticker(ticker, watch_list_map):
             'entry_result' : entry_result,
             'daily_short_k': watch_result.get('daily_short_k'),
             'chart'        : chart,
-            'current_price': daily[-1] if daily else None,
         }
     except Exception as e:
         log.debug(f'{ticker} 분석 오류: {e}')
         return None
 
-# ===================== 수동 스캔 트리거 =====================
+# ===================== 수동 스캔 =====================
 def manual_scan():
-    """dashboard.py의 /api/scan 엔드포인트에서 호출."""
     _manual_event.set()
 
 # ===================== 메인 스캔 =====================
@@ -305,6 +474,7 @@ def run_scan():
         scanner_state['new_entries']   = []
         scanner_state['entry_signals'] = []
         scanner_state['removed']       = []
+        scanner_state['closed_trades'] = []
 
     try:
         # 1) BTC 매크로
@@ -314,7 +484,7 @@ def run_scan():
         d_dist = macro.get('daily_distance_pct',  0) or 0
         log.info(f'매크로: safe={macro["safe"]} | 주봉MA20 {w_dist:+.2f}% | 일봉MA20 {d_dist:+.2f}%')
 
-        # 2) Watch List 불러오기
+        # 2) Watch List
         watch_list     = load_watch_list()
         watch_list_map = {w['ticker']: w for w in watch_list}
 
@@ -325,10 +495,7 @@ def run_scan():
         results    = []
         chart_data = {}
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = {
-                pool.submit(analyze_ticker, t, watch_list_map): t
-                for t in targets
-            }
+            futures = {pool.submit(analyze_ticker, t, watch_list_map): t for t in targets}
             for future in as_completed(futures):
                 r = future.result()
                 if r:
@@ -355,11 +522,9 @@ def run_scan():
             else:
                 new_watch_list.append(item)
 
-        # 6) 신규 등록 (등록 당시 가격 저장)
+        # 6) 신규 등록 (entry_price=None, 현재가 조회 후 채움)
         new_entries      = []
         existing_tickers = {w['ticker'] for w in new_watch_list}
-        results_map      = {r['ticker']: r for r in results}
-
         for r in results:
             wr     = r['watch_result']
             ticker = r['ticker']
@@ -372,56 +537,78 @@ def run_scan():
                     'registered_at': now_utc.isoformat(),
                     'daily_short_k': wr['daily_short_k'],
                     'reason'       : wr['reason'],
-                    'entry_price'  : r.get('current_price'),  # ← 등록 시 가격
+                    'entry_price'  : None,
+                    'current_price': None,
+                    'change_pct'   : None,
                 }
                 new_watch_list.append(entry)
                 new_entries.append(entry)
                 existing_tickers.add(ticker)
-                log.info(f'Watch 등록: {ticker} K={wr["daily_short_k"]:.1f} '
-                         f'@ {fmt_price(entry["entry_price"])}원')
+                log.info(f'Watch 등록: {ticker} K={wr["daily_short_k"]:.1f}')
 
-        # 7) 진입 트리거
+        # 7) 현재가 일괄 조회 (Watch List 전체)
+        all_tickers    = [w['ticker'] for w in new_watch_list]
+        current_prices = get_current_prices(all_tickers)
+
+        # 8) Watch List 현재가 업데이트 + entry_price 최초 1회 설정
+        for item in new_watch_list:
+            t = item['ticker']
+            if t in current_prices:
+                item['current_price'] = current_prices[t]['price']
+                item['change_pct']    = current_prices[t]['change_pct']
+                if item.get('entry_price') is None:
+                    item['entry_price'] = current_prices[t]['price']
+                    log.info(f'entry_price 설정: {t} = {fmt_price(item["entry_price"])}원')
+
+        # 9) 진입 트리거 → active_trades 등록
         entry_signals = []
         for r in results:
             er = r.get('entry_result')
             if er and er['should_enter']:
-                # Watch List에 있는 종목의 entry_price 참조
                 watch_item = next(
                     (w for w in new_watch_list if w['ticker'] == r['ticker']), {}
                 )
+                ep = watch_item.get('entry_price') or \
+                     current_prices.get(r['ticker'], {}).get('price')
+
                 signal = {
                     'ticker'      : r['ticker'],
                     'triggered_at': now_utc.isoformat(),
                     'trigger'     : er,
-                    'entry_price' : watch_item.get('entry_price'),
+                    'entry_price' : ep,
                 }
                 entry_signals.append(signal)
                 append_signal_history(signal)
                 log.info(f'진입 신호: {r["ticker"]} — {er["reason"]}')
 
-        # 8) 현재가 조회 (Watch List 종목 + 진입 신호 종목)
-        price_tickers = list({
-            w['ticker'] for w in new_watch_list
-        } | {s['ticker'] for s in entry_signals})
-        current_prices = get_current_prices(price_tickers)
+                # ★ active_trades에 포지션 오픈
+                if ep:
+                    open_trade(signal, ep)
 
-        # Watch List에 현재가 업데이트
-        for item in new_watch_list:
-            t = item['ticker']
-            if t in current_prices:
-                item['current_price']  = current_prices[t]['price']
-                item['change_pct']     = current_prices[t]['change_pct']
+        # 10) TP/SL/타임아웃 체크
+        #     active_trades에 있는 종목의 현재가도 조회
+        active_trades   = load_active_trades()
+        active_tickers  = [t['ticker'] for t in active_trades
+                           if t['ticker'] not in current_prices]
+        if active_tickers:
+            extra_prices = get_current_prices(active_tickers)
+            current_prices.update(extra_prices)
 
-        # 9) 저장
+        active_trades, closed_trades = check_active_trades(current_prices)
+
+        # 11) 저장
         save_watch_list(new_watch_list)
 
-        # 10) 텔레그램
+        # 12) 텔레그램
         if new_entries:
             send_telegram(build_new_entry_msg(new_entries, macro, current_prices))
         if entry_signals:
             send_telegram(build_entry_signal_msg(entry_signals, current_prices))
 
-        # 11) 상태 업데이트
+        # 13) 통계
+        stats = calc_trade_stats()
+
+        # 14) 상태 업데이트
         with _state_lock:
             scanner_state.update({
                 'status'        : 'done',
@@ -435,10 +622,17 @@ def run_scan():
                 'total_scanned' : len(targets),
                 'current_prices': current_prices,
                 'chart_data'    : chart_data,
+                'active_trades' : active_trades,
+                'closed_trades' : closed_trades,
+                'win_rate'      : stats['win_rate'],
+                'trade_stats'   : stats,
             })
 
-        log.info(f'스캔 완료 | {len(targets)}개 | Watch {len(new_watch_list)}개 | '
-                 f'신규 {len(new_entries)}개 | 진입 {len(entry_signals)}개')
+        log.info(
+            f'스캔 완료 | {len(targets)}개 | Watch {len(new_watch_list)}개 | '
+            f'진입 {len(entry_signals)}개 | 활성 {len(active_trades)}개 | '
+            f'청산 {len(closed_trades)}개 | 승률 {stats["win_rate"]}%'
+        )
 
     except Exception as e:
         log.error(f'스캔 오류: {e}', exc_info=True)
@@ -456,7 +650,6 @@ def scanner_loop():
                 next_at, tz=timezone.utc
             ).isoformat()
         log.info(f'다음 스캔까지 {SCAN_INTERVAL_MIN}분 대기')
-        # 수동 스캔 이벤트 대기 (타임아웃 = 주기)
         _manual_event.wait(timeout=SCAN_INTERVAL_MIN * 60)
         _manual_event.clear()
 
