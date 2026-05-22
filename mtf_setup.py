@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 mtf_setup.py — Upbit MTF Stochastic RSI 분석 모듈
-Version : v4.1.0
+Version : v4.1.1
 Changelog:
-  v4.1.0 - 4hK 과열 페널티 추가 (>50: -5pt, >80: -10pt)
-           등급별 만료 기간 차등 (C:3일, B:5일, A/S:없음)
-           진입 추천 강도 calc_entry_strength 함수 추가
-           방향 아이콘 매핑 get_direction_icon 추가
-  v4.0.1 - calc_watch_score 리턴 daily_k/h4_k/h1_k safe_k 방식으로 수정
+  v4.1.1 - calc_entry_strength에 grade 파라미터 추가
+           등급별 진입강도 상한 적용 (S:🚀 A:🎯 B:👀 C:⏳)
+           calc_watch_score에서 grade 확정 후 entry_strength 재계산
+  v4.1.0 - 4hK 과열 페널티, 등급별 만료, calc_entry_strength 추가
+  v4.0.1 - safe_k 방식으로 daily_k 반환 버그 수정
   v4.0.0 - Watch 점수/등급 시스템 도입
 """
 
 import os
 import math
 
-VERSION = 'v4.1.0'
+VERSION = 'v4.1.1'
 
 # ── Stoch RSI 프리셋 ─────────────────────────────────────────────
 PRESET_SHORT = (
@@ -50,13 +50,22 @@ GRADE_B_THRESHOLD  = int(os.getenv('GRADE_B_THRESHOLD', '40'))
 # ── Watch 만료 (등급별) ──────────────────────────────────────────
 WATCH_EXPIRY_DAYS_C = int(os.getenv('WATCH_EXPIRY_DAYS_C', '3'))
 WATCH_EXPIRY_DAYS_B = int(os.getenv('WATCH_EXPIRY_DAYS_B', '5'))
-WATCH_EXPIRY_DAYS   = int(os.getenv('WATCH_EXPIRY_DAYS',   '7'))  # fallback
+WATCH_EXPIRY_DAYS   = int(os.getenv('WATCH_EXPIRY_DAYS',   '7'))
 
 # ── 4h 과열 페널티 ───────────────────────────────────────────────
-H4_OVERHEAT_THRESHOLD    = float(os.getenv('H4_OVERHEAT_THRESHOLD',    '80.0'))
-H4_OVERHEAT_PENALTY      = int(os.getenv('H4_OVERHEAT_PENALTY',        '10'))
-H4_WARM_THRESHOLD        = float(os.getenv('H4_WARM_THRESHOLD',        '50.0'))
-H4_WARM_PENALTY          = int(os.getenv('H4_WARM_PENALTY',            '5'))
+H4_OVERHEAT_THRESHOLD = float(os.getenv('H4_OVERHEAT_THRESHOLD', '80.0'))
+H4_OVERHEAT_PENALTY   = int(os.getenv('H4_OVERHEAT_PENALTY',     '10'))
+H4_WARM_THRESHOLD     = float(os.getenv('H4_WARM_THRESHOLD',     '50.0'))
+H4_WARM_PENALTY       = int(os.getenv('H4_WARM_PENALTY',         '5'))
+
+# ── 등급별 진입강도 상한 ─────────────────────────────────────────
+# S: 3(강한신호), A: 2(진입고려), B: 1(관찰), C: 0(대기)
+GRADE_MAX_STRENGTH = {
+    'S': 3,
+    'A': 2,
+    'B': 1,
+    'C': 0,
+}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -72,7 +81,7 @@ def calc_rsi(closes, period=14):
     if len(closes) < period + 1:
         return []
     deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-    gains  = [max(d, 0)    for d in deltas]
+    gains  = [max(d, 0)      for d in deltas]
     losses = [abs(min(d, 0)) for d in deltas]
 
     avg_gain = sum(gains[:period])  / period
@@ -97,9 +106,9 @@ def calc_stoch_rsi(closes, rsi_period=14, stoch_period=14, smooth_k=3, smooth_d=
 
     raw_k = []
     for i in range(stoch_period - 1, len(rsi_vals)):
-        window  = rsi_vals[i - stoch_period + 1: i + 1]
-        lo, hi  = min(window), max(window)
-        denom   = hi - lo
+        window = rsi_vals[i - stoch_period + 1: i + 1]
+        lo, hi = min(window), max(window)
+        denom  = hi - lo
         raw_k.append((rsi_vals[i] - lo) / denom * 100 if denom != 0 else 50.0)
 
     if len(raw_k) < smooth_k:
@@ -167,16 +176,15 @@ def calc_direction(k_series, d_series=None):
 
 
 def get_direction_icon(direction, golden_cross=False):
-    """방향 → 아이콘 + 색상 클래스"""
     if golden_cross:
         return {'icon': '✨', 'css': 'text-yellow'}
     return {
-        '상승':   {'icon': '↑',  'css': 'text-green'},
-        '반등':   {'icon': '↗',  'css': 'text-lime'},
-        '횡보':   {'icon': '→',  'css': 'text-gray'},
-        '하락':   {'icon': '↓',  'css': 'text-red'},
-        '알수없음': {'icon': '?', 'css': 'text-gray'},
-    }.get(direction, {'icon': '?', 'css': 'text-gray'})
+        '상승':    {'icon': '↑',  'css': 'text-green'},
+        '반등':    {'icon': '↗',  'css': 'text-lime'},
+        '횡보':    {'icon': '→',  'css': 'text-gray'},
+        '하락':    {'icon': '↓',  'css': 'text-red'},
+        '알수없음': {'icon': '-',  'css': 'text-gray'},
+    }.get(direction, {'icon': '-', 'css': 'text-gray'})
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -189,18 +197,21 @@ def evaluate_daily_gate(daily_presets):
     if k_val is None:
         return {'pass': False, 'reason': '데이터 부족', 'daily_k': None}
     if k_val > OVERSOLD_THRESHOLD:
-        return {'pass': False, 'reason': f'일봉K({k_val:.1f}) > {OVERSOLD_THRESHOLD}', 'daily_k': round(k_val, 2)}
+        return {
+            'pass':    False,
+            'reason':  f'일봉K({k_val:.1f}) > {OVERSOLD_THRESHOLD}',
+            'daily_k': round(k_val, 2),
+        }
 
     k_series  = short.get('k_series', [])
     d_series  = short.get('d_series', [])
     dir_info  = calc_direction(k_series, d_series)
-    direction = dir_info['direction']
 
     return {
         'pass':      True,
-        'reason':    f'일봉K({k_val:.1f}) 과매도, 방향:{direction}',
+        'reason':    f'일봉K({k_val:.1f}) 과매도, 방향:{dir_info["direction"]}',
         'daily_k':   round(k_val, 2),
-        'direction': direction,
+        'direction': dir_info['direction'],
     }
 
 
@@ -226,30 +237,48 @@ def _safe_k(presets, preset_key='short'):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 진입 추천 강도
+# 진입 추천 강도 (등급 상한 적용)
 # ═══════════════════════════════════════════════════════════════
-def calc_entry_strength(daily_dir, h4_dir, h1_dir, h4_golden=False, h1_golden=False):
+def calc_entry_strength(daily_dir, h4_dir, h1_dir,
+                        h4_golden=False, h1_golden=False,
+                        grade=None):
     """
-    타임프레임 방향 조합으로 진입 강도 반환
-    반환: {'level': int(0~3), 'label': str, 'icon': str}
+    타임프레임 방향 조합으로 진입 강도 계산 후
+    등급별 상한(GRADE_MAX_STRENGTH)을 적용해 반환
+
+    등급 상한:
+      S → 최대 3 (🚀 강한신호)
+      A → 최대 2 (🎯 진입고려)
+      B → 최대 1 (👀 관찰)
+      C → 최대 0 (⏳ 대기)
     """
     strong_dirs = {'상승', '반등'}
 
+    # 방향 기반 원시 레벨 계산
     if h4_golden or h1_golden:
-        return {'level': 3, 'label': '강한신호', 'icon': '🚀'}
-
-    h4_strong = h4_dir in strong_dirs
-    h1_strong = h1_dir in strong_dirs
-    d_strong  = daily_dir in strong_dirs
-
-    if d_strong and h4_strong and h1_strong:
-        return {'level': 3, 'label': '강한신호', 'icon': '🚀'}
-    elif h4_strong and h1_strong:
-        return {'level': 2, 'label': '진입고려', 'icon': '🎯'}
-    elif h4_strong or (d_strong and h4_dir == '횡보'):
-        return {'level': 1, 'label': '관찰',    'icon': '👀'}
+        raw_level = 3
+    elif daily_dir in strong_dirs and h4_dir in strong_dirs and h1_dir in strong_dirs:
+        raw_level = 3
+    elif h4_dir in strong_dirs and h1_dir in strong_dirs:
+        raw_level = 2
+    elif h4_dir in strong_dirs or (daily_dir in strong_dirs and h4_dir == '횡보'):
+        raw_level = 1
     else:
-        return {'level': 0, 'label': '대기',    'icon': '⏳'}
+        raw_level = 0
+
+    # 등급 상한 적용
+    max_level = GRADE_MAX_STRENGTH.get(grade, 3) if grade else 3
+    level     = min(raw_level, max_level)
+
+    labels = {
+        3: ('강한신호', '🚀'),
+        2: ('진입고려', '🎯'),
+        1: ('관찰',    '👀'),
+        0: ('대기',    '⏳'),
+    }
+    label, icon = labels[level]
+
+    return {'level': level, 'label': label, 'icon': icon, 'raw_level': raw_level}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -262,11 +291,14 @@ def calc_watch_score(daily_presets, h4_presets=None, h1_presets=None,
       일봉 위치    15점
       일봉 방향    15점
       4h 위치     20점
-      4h 방향     20점  (4hK 과열 시 페널티)
+      4h 방향     20점  ← 4hK 과열 시 페널티
       1h 위치     10점
       1h 방향     10점
       거래량 보너스  5점
       추가하락 보너스 5점
+    ──────────────────
+      합계        100점
+    grade 확정 후 entry_strength를 등급 상한과 함께 재계산
     """
     score     = 0
     breakdown = {}
@@ -279,10 +311,10 @@ def calc_watch_score(daily_presets, h4_presets=None, h1_presets=None,
     d_dir      = calc_direction(d_k_series, d_d_series)
     daily_dir  = d_dir['direction']
 
-    if d_k <= 5:      d_pos = 15
-    elif d_k <= 10:   d_pos = 12
-    elif d_k <= 15:   d_pos = 8
-    else:             d_pos = 4
+    if d_k <= 5:    d_pos = 15
+    elif d_k <= 10: d_pos = 12
+    elif d_k <= 15: d_pos = 8
+    else:           d_pos = 4
     score += d_pos
     breakdown['daily_position'] = d_pos
 
@@ -294,9 +326,9 @@ def calc_watch_score(daily_presets, h4_presets=None, h1_presets=None,
     breakdown['daily_direction'] = d_dir_score
 
     # ── 4h ──────────────────────────────────────────────────────
-    h4_dir_label  = '알수없음'
-    h4_golden     = False
-    h4_k_val      = 0
+    h4_dir_label = '알수없음'
+    h4_golden    = False
+    h4_k_val     = 0
 
     if h4_presets:
         h4_short    = h4_presets.get('short', {})
@@ -385,18 +417,22 @@ def calc_watch_score(daily_presets, h4_presets=None, h1_presets=None,
     score += drop_bonus
     breakdown['drop_bonus'] = drop_bonus
 
-    # ── 진입 강도 ────────────────────────────────────────────────
-    entry_strength = calc_entry_strength(
-        daily_dir, h4_dir_label, h1_dir_label,
-        h4_golden=h4_golden, h1_golden=h1_golden
-    )
-
-    # ── 최종 등급 ────────────────────────────────────────────────
+    # ── 등급 확정 ────────────────────────────────────────────────
     score = max(0, min(100, score))
     if score >= GRADE_S_THRESHOLD:   grade = 'S'
     elif score >= GRADE_A_THRESHOLD: grade = 'A'
     elif score >= GRADE_B_THRESHOLD: grade = 'B'
     else:                            grade = 'C'
+
+    # ── 진입강도: 등급 확정 후 상한 적용 ────────────────────────
+    entry_strength = calc_entry_strength(
+        daily_dir    = daily_dir,
+        h4_dir       = h4_dir_label,
+        h1_dir       = h1_dir_label,
+        h4_golden    = h4_golden,
+        h1_golden    = h1_golden,
+        grade        = grade,          # ← 등급 상한 적용
+    )
 
     return {
         'score':          score,
@@ -418,7 +454,6 @@ def calc_watch_score(daily_presets, h4_presets=None, h1_presets=None,
 # 등급별 만료 기간
 # ═══════════════════════════════════════════════════════════════
 def get_expiry_days(grade):
-    """등급별 만료 기간 반환 (A/S는 None = 만료 없음)"""
     return {
         'C': WATCH_EXPIRY_DAYS_C,
         'B': WATCH_EXPIRY_DAYS_B,
@@ -474,4 +509,5 @@ def get_module_config():
         'H4_OVERHEAT_PENALTY':   H4_OVERHEAT_PENALTY,
         'H4_WARM_THRESHOLD':     H4_WARM_THRESHOLD,
         'H4_WARM_PENALTY':       H4_WARM_PENALTY,
+        'GRADE_MAX_STRENGTH':    GRADE_MAX_STRENGTH,
     }
