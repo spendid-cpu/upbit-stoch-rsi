@@ -19,7 +19,6 @@ app = Flask(__name__)
 
 
 def _start_threads():
-    # 시작 시 기존 데이터 즉시 로드
     try:
         watch_list    = scanner.load_watch_list()
         active_trades = scanner.load_active_trades()
@@ -32,13 +31,18 @@ def _start_threads():
     except Exception as e:
         log.warning(f"초기 로드 실패: {e}")
 
-    t1 = threading.Thread(target=scanner.scanner_loop,     daemon=True)
-    t2 = threading.Thread(target=scanner.price_check_loop, daemon=True)
-    t1.start()
-    t2.start()
+    # 4개 스레드 동시 시작
+    for target in [
+        scanner.scanner_loop,
+        scanner.watch_rescan_loop,
+        scanner.price_check_loop,
+        scanner.active_monitor_loop,
+    ]:
+        threading.Thread(target=target, daemon=True).start()
 
 
 _start_threads()
+
 
 # ════════════════════════════════════════════════
 # HTML 템플릿
