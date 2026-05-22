@@ -1,5 +1,5 @@
 """
-scanner.py v2.4.3
+scanner.py v2.4.3(fixed)
 Upbit MTF 자동 스캐너
 
 변경사항 (v2.4.3):
