@@ -5,6 +5,7 @@ dashboard.py v2.4.5
 - GX! 완전 수정
 - 진입/제거 버튼 UI 개선
 - 버전 클릭 시 변경이력 툴팁
+- scanner 루프 함수 직접 스레드 시작 (start_background_tasks 제거)
 """
 
 from flask import Flask, jsonify, request, render_template_string
@@ -34,7 +35,6 @@ HTML_TEMPLATE = r"""
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; font-size: 13px; }
 
-  /* ── Header ── */
   .header {
     display: flex; align-items: center; justify-content: space-between;
     padding: 10px 20px; background: var(--card);
@@ -57,7 +57,6 @@ HTML_TEMPLATE = r"""
     color: var(--text); white-space: pre-wrap;
   }
   .version-badge:hover .version-tooltip { display: block; }
-
   .idle-badge {
     background: #1a2a1a; border: 1px solid var(--green);
     color: var(--green); font-size: 10px; padding: 2px 8px; border-radius: 10px;
@@ -70,7 +69,6 @@ HTML_TEMPLATE = r"""
   }
   .btn-scan:hover { background: var(--blue); color: #000; }
 
-  /* ── Stats Cards ── */
   .stats-row { display: flex; gap: 10px; padding: 14px 20px; flex-wrap: wrap; }
   .stat-card {
     background: var(--card); border: 1px solid var(--border);
@@ -83,7 +81,6 @@ HTML_TEMPLATE = r"""
   .yellow { color: var(--yellow); } .blue { color: var(--blue); }
   .orange { color: var(--orange); }
 
-  /* ── Grade Bars ── */
   .grade-bars { display: flex; gap: 8px; padding: 0 20px 14px; flex-wrap: wrap; }
   .grade-bar-card {
     background: var(--card); border: 1px solid var(--border);
@@ -96,8 +93,7 @@ HTML_TEMPLATE = r"""
   .grade-bar-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
   .grade-bar-stats { font-size: 10px; color: var(--muted); }
 
-  /* ── Tabs ── */
-  .tabs { display: flex; gap: 0; padding: 0 20px; border-bottom: 1px solid var(--border); margin-bottom: 0; }
+  .tabs { display: flex; padding: 0 20px; border-bottom: 1px solid var(--border); }
   .tab {
     padding: 8px 16px; cursor: pointer; font-size: 12px;
     color: var(--muted); border-bottom: 2px solid transparent;
@@ -111,7 +107,6 @@ HTML_TEMPLATE = r"""
   }
   .tab.active .tab-count { background: var(--blue); color: #000; }
 
-  /* ── Entry Guide ── */
   .entry-guide {
     background: #0d1f0d; border: 1px solid #1a3a1a;
     border-radius: 8px; margin: 12px 20px; padding: 10px 14px;
@@ -119,9 +114,7 @@ HTML_TEMPLATE = r"""
   .entry-guide-title { font-size: 11px; color: var(--green); margin-bottom: 8px; font-weight: 600; }
   .entry-guide-items { display: flex; flex-wrap: wrap; gap: 12px; }
   .eg-item { font-size: 10px; color: var(--muted); line-height: 1.5; }
-  .eg-item .eg-icon { font-size: 12px; margin-right: 3px; }
 
-  /* ── Table ── */
   .table-wrap { padding: 0 20px 20px; overflow-x: auto; }
   .search-row { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; }
   .search-input {
@@ -143,47 +136,41 @@ HTML_TEMPLATE = r"""
   tr:hover td { background: #161b22; }
   .ticker-name { font-weight: 700; font-size: 13px; color: var(--text); }
 
-  /* K-value cells */
   .k-extreme { color: var(--red); font-weight: 700; }
   .k-low     { color: var(--orange); }
   .k-mid     { color: var(--yellow); }
   .k-high    { color: var(--green); }
   .k-over    { color: var(--red); font-weight: 700; }
 
-  /* Grade badges */
   .grade-s { background:#3d1a6e; color:var(--purple); border:1px solid var(--purple); padding:1px 6px; border-radius:4px; font-size:10px; font-weight:700; }
   .grade-a { background:#1a2a4a; color:var(--blue);   border:1px solid var(--blue);   padding:1px 6px; border-radius:4px; font-size:10px; font-weight:700; }
   .grade-b { background:#1a3a1a; color:var(--green);  border:1px solid var(--green);  padding:1px 6px; border-radius:4px; font-size:10px; font-weight:700; }
   .grade-c { background:#2a2a1a; color:var(--yellow); border:1px solid var(--yellow); padding:1px 6px; border-radius:4px; font-size:10px; font-weight:700; }
 
-  /* Entry strength */
   .es-strong  { color:var(--green);  font-weight:700; }
   .es-target  { color:var(--blue);   font-weight:600; }
   .es-watch   { color:var(--yellow); }
   .es-wait    { color:var(--muted);  }
   .es-overheat { color:var(--orange); font-size:10px; }
 
-  /* Direction */
   .dir-up   { color:var(--green); }
   .dir-down { color:var(--red);   }
   .dir-side { color:var(--muted); }
   .dir-gx   { color:var(--yellow); font-weight:700; }
 
-  /* Type badges */
   .type-auto   { background:#1a2a4a; color:var(--blue);   border:1px solid var(--blue);   font-size:9px; padding:1px 5px; border-radius:3px; }
   .type-manual { background:#1a3a1a; color:var(--green);  border:1px solid var(--green);  font-size:9px; padding:1px 5px; border-radius:3px; }
   .type-deep   { background:#3a1a2a; color:var(--pink);   border:1px solid var(--pink);   font-size:9px; padding:1px 5px; border-radius:3px; }
 
-  /* Buttons */
-  .btn-entry  {
+  .btn-entry {
     background:#1a3a1a; border:1px solid var(--green);
     color:var(--green); padding:3px 8px; border-radius:5px;
-    cursor:pointer; font-size:11px; transition:all 0.2s;
+    cursor:pointer; font-size:11px; transition:all 0.2s; margin-right:4px;
   }
-  .btn-entry:hover  { background:var(--green);  color:#000; }
+  .btn-entry:hover { background:var(--green); color:#000; }
   .btn-remove {
     background:#3a1a1a; border:1px solid var(--red);
-    color:var(--red);   padding:3px 8px; border-radius:5px;
+    color:var(--red); padding:3px 8px; border-radius:5px;
     cursor:pointer; font-size:11px; transition:all 0.2s;
   }
   .btn-remove:hover { background:var(--red); color:#fff; }
@@ -193,7 +180,6 @@ HTML_TEMPLATE = r"""
     cursor:pointer; font-size:11px;
   }
 
-  /* Modal */
   .modal-overlay {
     display:none; position:fixed; top:0; left:0; width:100%; height:100%;
     background:rgba(0,0,0,0.7); z-index:1000; align-items:center; justify-content:center;
@@ -211,16 +197,8 @@ HTML_TEMPLATE = r"""
   .btn-confirm { background:var(--green); border:none; color:#000; }
   .btn-cancel  { background:#21262d; border:1px solid var(--border); color:var(--text); }
 
-  /* Sparkline */
-  .sparkline svg { display:block; }
-
-  /* Countdown */
   .countdown { font-size:10px; color:var(--muted); }
-
-  /* Empty state */
   .empty-state { text-align:center; padding:40px; color:var(--muted); font-size:13px; }
-
-  /* Scrollbar */
   ::-webkit-scrollbar { width:6px; height:6px; }
   ::-webkit-scrollbar-track { background:var(--bg); }
   ::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
@@ -228,24 +206,21 @@ HTML_TEMPLATE = r"""
 </head>
 <body>
 
-<!-- Header -->
 <div class="header">
   <div class="header-left">
     <span class="header-title">📊 Upbit MTF Scanner</span>
-    <div class="version-badge" id="versionBadge">
+    <div class="version-badge">
       v2.4.5
-      <div class="version-tooltip" id="versionTooltip">
-📦 dashboard  v2.4.5
-🔧 scanner    v2.4.3
+      <div class="version-tooltip" id="versionTooltip">📦 dashboard  v2.4.5
+🔧 scanner    v2.4.2
 ⚙️ mtf_setup  v4.2.3
 
 변경이력:
 • 상단 버전 뱃지 추가
-• /api/version 엔드포인트
 • GX! 완전 수정
-• 진입/제거 버튼 UI 개선
+• 진입/제거 버튼 분리
 • 레거시 dir_info 자동 마이그레이션
-      </div>
+• scanner 루프 직접 스레드 시작</div>
     </div>
     <span class="idle-badge" id="idleBadge">● idle</span>
   </div>
@@ -255,8 +230,7 @@ HTML_TEMPLATE = r"""
   </div>
 </div>
 
-<!-- Stats -->
-<div class="stats-row" id="statsRow">
+<div class="stats-row">
   <div class="stat-card">
     <div class="stat-label">Watch</div>
     <div class="stat-value blue" id="statWatch">0</div>
@@ -268,7 +242,7 @@ HTML_TEMPLATE = r"""
   <div class="stat-card">
     <div class="stat-label">DEEP Active</div>
     <div class="stat-value" id="statDeep">0</div>
-    <div class="stat-sub" id="statDeepSub">BTC 하락 중 비버</div>
+    <div class="stat-sub">BTC 하락 중 비버</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">승률</div>
@@ -285,10 +259,8 @@ HTML_TEMPLATE = r"""
   </div>
 </div>
 
-<!-- Grade Bars -->
 <div class="grade-bars" id="gradeBars"></div>
 
-<!-- Tabs -->
 <div class="tabs">
   <div class="tab active" onclick="switchTab('watch')" id="tab-watch">
     👁 Watch <span class="tab-count" id="tc-watch">0</span>
@@ -307,22 +279,18 @@ HTML_TEMPLATE = r"""
   </div>
 </div>
 
-<!-- Entry Guide -->
 <div class="entry-guide">
   <div class="entry-guide-title">📌 진입강도 매매 가이드</div>
   <div class="entry-guide-items">
-    <div class="eg-item"><span class="eg-icon">🚀</span><b>강한신호</b> – S/A등급 → 적극 진입 고려</div>
-    <div class="eg-item"><span class="eg-icon">🎯</span><b>강한신호</b> – B등급 → 차트 관람등, 다음 채스텐 주목</div>
-    <div class="eg-item"><span class="eg-icon">🔥</span><b>진입고려</b> – S/A등급 → 진입 준비 / 일봉Ks≥2 자동 보장</div>
-    <div class="eg-item"><span class="eg-icon">👀</span><b>관찰</b> – 방향 형성 중 / 일봉Ks≤2 됩보에도 최소 보장</div>
-    <div class="eg-item"><span class="eg-icon">⏳</span><b>신호 없음</b> → 완전 대기</div>
-    <div class="eg-item"><span class="eg-icon">⚠</span><b>4hK과열</b> – 4hK≥80 → 진입강도 1단계 자동 하향</div>
+    <div class="eg-item">🚀 <b>강한신호</b> – S/A등급 → 적극 진입 고려</div>
+    <div class="eg-item">🎯 <b>준비</b> – B등급 → 차트 확인 후 진입</div>
+    <div class="eg-item">👀 <b>관찰</b> – 방향 형성 중 / 일봉K≤2 최소 보장</div>
+    <div class="eg-item">⏳ <b>대기</b> – 신호 없음</div>
+    <div class="eg-item">⚠ <b>4hK과열</b> – 4hK≥80 → 진입강도 1단계 하향</div>
   </div>
 </div>
 
-<!-- Tab Content -->
 <div id="tabContent">
-  <!-- Watch Tab -->
   <div id="pane-watch" class="tab-pane">
     <div class="table-wrap">
       <div class="search-row">
@@ -330,51 +298,42 @@ HTML_TEMPLATE = r"""
         <button class="btn-add" onclick="addWatch()">+ Watch 추가</button>
       </div>
       <table>
-        <thead>
-          <tr>
-            <th>티커</th><th>등급</th><th>점수</th><th>Δ</th>
-            <th>일봉K</th><th>4hK</th><th>1hK</th>
-            <th>진입강도</th><th>방향(일/4h/1h)</th><th>추세</th>
-            <th>거래량</th><th>현재가</th><th>등록</th><th>만료</th><th>관리</th>
-          </tr>
-        </thead>
+        <thead><tr>
+          <th>티커</th><th>등급</th><th>점수</th><th>Δ</th>
+          <th>일봉K</th><th>4hK</th><th>1hK</th>
+          <th>진입강도</th><th>방향(일/4h/1h)</th><th>추세</th>
+          <th>거래량</th><th>현재가</th><th>등록</th><th>만료</th><th>관리</th>
+        </tr></thead>
         <tbody id="watchBody"></tbody>
       </table>
     </div>
   </div>
 
-  <!-- Active Tab -->
   <div id="pane-active" class="tab-pane" style="display:none">
     <div class="table-wrap">
       <table>
-        <thead>
-          <tr>
-            <th>티커</th><th>등급</th><th>타입</th><th>진입가</th>
-            <th>현재가</th><th>PnL</th><th>TP</th><th>SL</th>
-            <th>진입시각</th><th>관리</th>
-          </tr>
-        </thead>
+        <thead><tr>
+          <th>티커</th><th>등급</th><th>타입</th><th>진입가</th>
+          <th>현재가</th><th>PnL</th><th>TP</th><th>SL</th>
+          <th>진입시각</th><th>관리</th>
+        </tr></thead>
         <tbody id="activeBody"></tbody>
       </table>
     </div>
   </div>
 
-  <!-- DEEP Tab -->
   <div id="pane-deep" class="tab-pane" style="display:none">
     <div class="table-wrap">
       <table>
-        <thead>
-          <tr>
-            <th>티커</th><th>DEEP점수</th><th>일봉K</th><th>BTC상대강도</th>
-            <th>바닥일수</th><th>거래량비율</th><th>진입시각</th><th>관리</th>
-          </tr>
-        </thead>
+        <thead><tr>
+          <th>티커</th><th>DEEP점수</th><th>일봉K</th><th>BTC상대강도</th>
+          <th>바닥일수</th><th>거래량비율</th><th>진입시각</th><th>관리</th>
+        </tr></thead>
         <tbody id="deepBody"></tbody>
       </table>
     </div>
   </div>
 
-  <!-- New Tab -->
   <div id="pane-new" class="tab-pane" style="display:none">
     <div class="table-wrap">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
@@ -382,34 +341,28 @@ HTML_TEMPLATE = r"""
         <span class="countdown" id="nextScanCountdown">다음 스캔: --</span>
       </div>
       <table>
-        <thead>
-          <tr>
-            <th>티커</th><th>등급</th><th>점수</th><th>일봉K</th><th>4hK</th>
-            <th>진입강도</th><th>방향</th><th>감지시각</th>
-          </tr>
-        </thead>
+        <thead><tr>
+          <th>티커</th><th>등급</th><th>점수</th><th>일봉K</th><th>4hK</th>
+          <th>진입강도</th><th>방향</th><th>감지시각</th>
+        </tr></thead>
         <tbody id="newBody"></tbody>
       </table>
     </div>
   </div>
 
-  <!-- History Tab -->
   <div id="pane-history" class="tab-pane" style="display:none">
     <div class="table-wrap">
       <table>
-        <thead>
-          <tr>
-            <th>티커</th><th>등급</th><th>타입</th><th>진입가</th><th>종료가</th>
-            <th>PnL</th><th>결과</th><th>진입시각</th><th>종료시각</th>
-          </tr>
-        </thead>
+        <thead><tr>
+          <th>티커</th><th>등급</th><th>타입</th><th>진입가</th><th>종료가</th>
+          <th>PnL</th><th>결과</th><th>진입시각</th><th>종료시각</th>
+        </tr></thead>
         <tbody id="histBody"></tbody>
       </table>
     </div>
   </div>
 </div>
 
-<!-- Entry Confirm Modal -->
 <div class="modal-overlay" id="entryModal">
   <div class="modal">
     <div class="modal-title">📈 수동 진입 확인</div>
@@ -427,14 +380,12 @@ HTML_TEMPLATE = r"""
 </div>
 
 <script>
-// ── State ──
 let state = {};
 let currentTab = 'watch';
 let pendingEntry = null;
 let nextScanSec = 300;
 let countdownTimer = null;
 
-// ── API ──
 async function fetchState() {
   try {
     const r = await fetch('/api/state');
@@ -448,12 +399,12 @@ async function manualScan() {
   document.getElementById('idleBadge').style.color = 'var(--yellow)';
   try {
     await fetch('/api/scan', {method:'POST'});
-    await fetchState();
+    setTimeout(fetchState, 3000);
   } finally {
     setTimeout(()=>{
       document.getElementById('idleBadge').textContent = '● idle';
       document.getElementById('idleBadge').style.color = 'var(--green)';
-    }, 2000);
+    }, 3000);
   }
 }
 
@@ -466,8 +417,8 @@ async function addWatch() {
     body: JSON.stringify({ticker})
   });
   const d = await r.json();
-  if (d.success) { alert('✅ ' + ticker + ' Watch 추가 완료'); fetchState(); }
-  else alert('❌ ' + (d.message||'실패'));
+  alert(d.success ? '✅ ' + ticker + ' Watch 추가 완료' : '❌ ' + (d.message||'실패'));
+  if (d.success) fetchState();
 }
 
 async function removeWatch(ticker) {
@@ -494,11 +445,11 @@ function openEntryModal(ticker) {
   const price = item.current_price || 0;
   pendingEntry = {ticker, item};
   document.getElementById('m-ticker').textContent = ticker.replace('KRW-','');
-  document.getElementById('m-grade').innerHTML  = gradeHtml(item.grade);
-  document.getElementById('m-price').textContent = fmtPrice(price);
-  document.getElementById('m-tp').textContent    = fmtPrice(price * 1.05);
-  document.getElementById('m-sl').textContent    = fmtPrice(price * 0.97);
-  document.getElementById('m-es').innerHTML      = esHtml(item.entry_strength, item.h4_k);
+  document.getElementById('m-grade').innerHTML    = gradeHtml(item.grade);
+  document.getElementById('m-price').textContent  = fmtPrice(price);
+  document.getElementById('m-tp').textContent     = fmtPrice(price * 1.05);
+  document.getElementById('m-sl').textContent     = fmtPrice(price * 0.97);
+  document.getElementById('m-es').innerHTML       = esHtml(item.entry_level, item.h4_k);
   document.getElementById('entryModal').classList.add('show');
 }
 
@@ -519,7 +470,6 @@ function closeModal() {
   document.getElementById('entryModal').classList.remove('show');
 }
 
-// ── Render ──
 function render() {
   renderStats();
   renderGradeBars();
@@ -529,66 +479,62 @@ function render() {
   renderNew();
   renderHistory();
   updateTabCounts();
-  if (state.last_scan_time) {
+  if (state.last_scan_at) {
     document.getElementById('lastScanTime').textContent =
-      '마지막 스캔: ' + new Date(state.last_scan_time*1000).toLocaleTimeString('ko-KR');
+      '마지막 스캔: ' + new Date(state.last_scan_at).toLocaleTimeString('ko-KR');
   }
-  // Update version tooltip from API
   if (state.versions) {
-    const t = document.getElementById('versionTooltip');
-    t.textContent =
+    document.getElementById('versionTooltip').textContent =
       '📦 dashboard  ' + (state.versions.dashboard||'v2.4.5') + '\n' +
       '🔧 scanner    ' + (state.versions.scanner||'-') + '\n' +
       '⚙️ mtf_setup  ' + (state.versions.mtf_setup||'-') + '\n\n변경이력:\n' +
-      '• 상단 버전 뱃지 추가\n• GX! 완전 수정\n• 진입/제거 버튼 UI 개선';
+      '• 상단 버전 뱃지 추가\n• GX! 완전 수정\n• 진입/제거 버튼 분리\n• scanner 루프 직접 스레드 시작';
   }
 }
 
 function renderStats() {
   const s = state;
-  setText('statWatch',   s.watch_count  || 0);
-  setText('statActive',  s.active_count || 0);
+  setText('statWatch',  s.watch_count  || 0);
+  setText('statActive', s.active_count || 0);
   const deepCnt = (s.active_trades||[]).filter(t=>t.trade_type==='deep').length;
   setText('statDeep', deepCnt);
-  document.getElementById('statDeep').className = 'stat-value ' + (deepCnt>0?'red':'');
+  document.getElementById('statDeep').className = 'stat-value ' + (deepCnt > 0 ? 'red' : '');
 
-  const wins  = s.win_count  || 0;
-  const total = s.trade_count|| 0;
-  const wr    = total>0 ? (wins/total*100).toFixed(1) : '0.0';
+  const stats = s.stats || {};
+  const wr    = stats.win_rate != null ? stats.win_rate.toFixed(1) : '0.0';
   setText('statWinrate', wr + '%');
 
-  const pnl = s.avg_pnl || 0;
+  const pnl   = stats.avg_pnl || 0;
   const pnlEl = document.getElementById('statPnl');
-  pnlEl.textContent  = (pnl>=0?'+':'')+pnl.toFixed(2)+'%';
-  pnlEl.className    = 'stat-value ' + (pnl>=0?'green':'red');
+  pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%';
+  pnlEl.className   = 'stat-value ' + (pnl >= 0 ? 'green' : 'red');
 
-  if (s.btc_ma20) {
-    setText('statBtcMa', fmtPrice(s.btc_ma20));
-    const cur  = s.btc_price || 0;
-    const diff = cur>0 ? ((cur-s.btc_ma20)/s.btc_ma20*100).toFixed(1) : 0;
-    const sub  = document.getElementById('statBtcSub');
-    sub.innerHTML = '현재 '+fmtPrice(cur)+' | <span class="'+(diff>=0?'green':'red')+'">'+(diff>=0?'+':'')+diff+'%</span>';
+  const macro = s.macro || {};
+  if (macro.ma20) {
+    setText('statBtcMa', fmtPrice(macro.ma20));
+    const cur  = macro.current_price || 0;
+    const diff = cur > 0 ? ((cur - macro.ma20) / macro.ma20 * 100).toFixed(1) : 0;
+    document.getElementById('statBtcSub').innerHTML =
+      '현재 ' + fmtPrice(cur) + ' | <span class="' + (diff >= 0 ? 'green' : 'red') + '">' +
+      (diff >= 0 ? '+' : '') + diff + '%</span>';
   }
 }
 
 function renderGradeBars() {
-  const el = document.getElementById('gradeBars');
+  const el     = document.getElementById('gradeBars');
   const grades = ['S','A','B','C'];
   const colors = {S:'var(--purple)',A:'var(--blue)',B:'var(--green)',C:'var(--yellow)'};
-  const stats = state.grade_stats || {};
-  const total = Object.values(stats).reduce((a,v)=>a+(v.count||0),0) || 1;
-
-  // innerHTML 방식으로 완전 교체 (appendChild 방식 금지)
+  const stats  = (state.stats || {}).grade_stats || {};
+  const total  = Object.values(stats).reduce((a,v) => a + (v.total||0), 0) || 1;
   el.innerHTML = grades.map(g => {
-    const d    = stats[g] || {count:0, avg_score:0, avg_pnl:0};
-    const pct  = Math.round((d.count||0)/total*100);
-    const avgP = (d.avg_pnl||0).toFixed(1);
+    const d   = stats[g] || {total:0, avg_pnl:0, win_rate:0};
+    const pct = Math.round((d.total||0) / total * 100);
     return `<div class="grade-bar-card">
-      <div class="grade-bar-label">${g}등급 승률</div>
+      <div class="grade-bar-label">${g}등급</div>
       <div class="grade-bar-track">
         <div class="grade-bar-fill" style="width:${pct}%;background:${colors[g]}"></div>
       </div>
-      <div class="grade-bar-stats">${pct}% | avg +${avgP}% | ${d.count||0}건</div>
+      <div class="grade-bar-stats">${d.win_rate||0}% | avg ${d.avg_pnl>=0?'+':''}${(d.avg_pnl||0).toFixed(1)}% | ${d.total||0}건</div>
     </div>`;
   }).join('');
 }
@@ -596,43 +542,40 @@ function renderGradeBars() {
 function updateTabCounts() {
   const wl   = state.watch_list    || [];
   const at   = state.active_trades || [];
-  const deep = at.filter(t=>t.trade_type==='deep');
+  const deep = at.filter(t => t.trade_type === 'deep');
   const ne   = state.new_entries   || [];
-  document.getElementById('tc-watch').textContent  = wl.length;
-  document.getElementById('tc-active').textContent = at.length;
-  document.getElementById('tc-deep').textContent   = deep.length;
-  document.getElementById('tc-new').textContent    = ne.length;
+  setText('tc-watch',  wl.length);
+  setText('tc-active', at.length);
+  setText('tc-deep',   deep.length);
+  setText('tc-new',    ne.length);
 }
 
 function renderWatch() {
-  const q    = (document.getElementById('watchSearch').value||'').toUpperCase();
-  const list = (state.watch_list||[]).filter(w=>
+  const q    = (document.getElementById('watchSearch').value || '').toUpperCase();
+  const list = (state.watch_list || []).filter(w =>
     !q || w.ticker.includes(q) || w.ticker.replace('KRW-','').includes(q));
   const tb = document.getElementById('watchBody');
-  if (!list.length) { tb.innerHTML='<tr><td colspan="15" class="empty-state">Watch 항목 없음</td></tr>'; return; }
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="15" class="empty-state">Watch 항목 없음</td></tr>';
+    return;
+  }
   tb.innerHTML = list.map(w => {
-    const sym  = w.ticker.replace('KRW-','');
-    const dk   = kCell(w.daily_k);
-    const hk   = h4kCell(w.h4_k);
-    const ok   = kCell(w.h1_k);
-    const dir  = dirCell(w.daily_dir_info, w.h4_dir_info, w.h1_dir_info);
-    const es   = esHtml(w.entry_strength, w.h4_k);
-    const sp   = sparkline(w.score_history);
-    const delta= deltaCell(w.score_history);
-    const exp  = w.expire_time ? timeLeft(w.expire_time) : '5분전';
-    const reg  = w.added_time  ? fmtTime(w.added_time)  : '-';
+    const sym   = w.ticker.replace('KRW-','');
+    const delta = deltaCell(w.score_history);
+    const exp   = w.expire_at  ? timeLeft(w.expire_at)     : '-';
+    const reg   = w.registered_at ? fmtTimeISO(w.registered_at) : '-';
     return `<tr>
       <td><span class="ticker-name">${sym}</span></td>
       <td>${gradeHtml(w.grade)}</td>
       <td>${w.score||0}</td>
       <td>${delta}</td>
-      <td>${dk}</td>
-      <td>${hk}</td>
-      <td>${ok}</td>
-      <td>${es}</td>
-      <td>${dir}</td>
-      <td>${sp}</td>
-      <td>${(w.volume_ratio||1).toFixed(2)}x</td>
+      <td>${kCell(w.daily_k)}</td>
+      <td>${h4kCell(w.h4_k)}</td>
+      <td>${kCell(w.h1_k)}</td>
+      <td>${esHtml(w.entry_level, w.h4_k)}</td>
+      <td>${dirCell(w.daily_dir_info, w.h4_dir_info, w.h1_dir_info)}</td>
+      <td>${sparkline(w.score_history)}</td>
+      <td>${(w.vol_ratio||1).toFixed(2)}x</td>
       <td>${fmtPrice(w.current_price)}</td>
       <td>${reg}</td>
       <td>${exp}</td>
@@ -645,38 +588,44 @@ function renderWatch() {
 }
 
 function renderActive() {
-  const list = (state.active_trades||[]).filter(t=>t.trade_type!=='deep');
+  const list = (state.active_trades || []).filter(t => t.trade_type !== 'deep');
   const tb   = document.getElementById('activeBody');
-  if (!list.length) { tb.innerHTML='<tr><td colspan="10" class="empty-state">활성 트레이드 없음</td></tr>'; return; }
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="10" class="empty-state">활성 트레이드 없음</td></tr>';
+    return;
+  }
   tb.innerHTML = list.map(t => {
-    const pnl = calcPnl(t.entry_price, t.current_price);
+    const pnl = t.pnl_pct || 0;
     return `<tr>
       <td><span class="ticker-name">${t.ticker.replace('KRW-','')}</span></td>
       <td>${gradeHtml(t.grade)}</td>
-      <td><span class="type-${t.trade_type||'auto'}">${typeLabel(t.trade_type)}</span></td>
+      <td><span class="type-${t.trade_type||'normal'}">${typeLabel(t.trade_type)}</span></td>
       <td>${fmtPrice(t.entry_price)}</td>
       <td>${fmtPrice(t.current_price)}</td>
       <td class="${pnl>=0?'green':'red'}">${(pnl>=0?'+':'')+pnl.toFixed(2)}%</td>
       <td class="green">${fmtPrice(t.tp_price)}</td>
       <td class="red">${fmtPrice(t.sl_price)}</td>
-      <td>${t.entry_time ? fmtTime(t.entry_time) : '-'}</td>
+      <td>${t.activated_at ? fmtTimeISO(t.activated_at) : '-'}</td>
       <td><button class="btn-close" onclick="closeActive('${t.ticker}')">종료</button></td>
     </tr>`;
   }).join('');
 }
 
 function renderDeep() {
-  const list = (state.active_trades||[]).filter(t=>t.trade_type==='deep');
+  const list = (state.active_trades || []).filter(t => t.trade_type === 'deep');
   const tb   = document.getElementById('deepBody');
-  if (!list.length) { tb.innerHTML='<tr><td colspan="8" class="empty-state">DEEP 진입 없음 – BTC 하락 중 비버</td></tr>'; return; }
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="8" class="empty-state">DEEP 진입 없음</td></tr>';
+    return;
+  }
   tb.innerHTML = list.map(t => `<tr>
     <td><span class="ticker-name">${t.ticker.replace('KRW-','')}</span></td>
     <td>${t.deep_score||0}</td>
     <td>${kCell(t.daily_k)}</td>
     <td>${(t.relative_strength||0).toFixed(1)}%</td>
-    <td>${t.bottom_days||0}일</td>
-    <td>${(t.volume_ratio||1).toFixed(2)}x</td>
-    <td>${t.entry_time ? fmtTime(t.entry_time) : '-'}</td>
+    <td>${t.days_at_bottom||0}일</td>
+    <td>${(t.vol_ratio||1).toFixed(2)}x</td>
+    <td>${t.activated_at ? fmtTimeISO(t.activated_at) : '-'}</td>
     <td><button class="btn-close" onclick="closeActive('${t.ticker}')">종료</button></td>
   </tr>`).join('');
 }
@@ -684,45 +633,51 @@ function renderDeep() {
 function renderNew() {
   const list = state.new_entries || [];
   const tb   = document.getElementById('newBody');
-  if (!list.length) { tb.innerHTML='<tr><td colspan="8" class="empty-state">최근 신규 감지 없음</td></tr>'; return; }
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="8" class="empty-state">최근 신규 감지 없음</td></tr>';
+    return;
+  }
   tb.innerHTML = list.map(n => `<tr>
     <td><span class="ticker-name">${n.ticker.replace('KRW-','')}</span></td>
     <td>${gradeHtml(n.grade)}</td>
     <td>${n.score||0}</td>
     <td>${kCell(n.daily_k)}</td>
     <td>${h4kCell(n.h4_k)}</td>
-    <td>${esHtml(n.entry_strength, n.h4_k)}</td>
+    <td>${esHtml(n.entry_level, n.h4_k)}</td>
     <td>${dirCell(n.daily_dir_info, n.h4_dir_info, n.h1_dir_info)}</td>
-    <td>${n.detected_time ? fmtTime(n.detected_time) : '-'}</td>
+    <td>${n.registered_at ? fmtTimeISO(n.registered_at) : '-'}</td>
   </tr>`).join('');
 }
 
 function renderHistory() {
   const list = state.trade_history || [];
   const tb   = document.getElementById('histBody');
-  if (!list.length) { tb.innerHTML='<tr><td colspan="9" class="empty-state">히스토리 없음</td></tr>'; return; }
-  tb.innerHTML = [...list].reverse().slice(0,50).map(h => {
-    const pnl = calcPnl(h.entry_price, h.exit_price);
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="9" class="empty-state">히스토리 없음</td></tr>';
+    return;
+  }
+  tb.innerHTML = [...list].filter(h=>h.type==='close').reverse().slice(0,50).map(h => {
+    const pnl = h.pnl_pct || 0;
     return `<tr>
       <td><span class="ticker-name">${h.ticker.replace('KRW-','')}</span></td>
       <td>${gradeHtml(h.grade)}</td>
-      <td><span class="type-${h.trade_type||'auto'}">${typeLabel(h.trade_type)}</span></td>
+      <td><span class="type-${h.trade_type||'normal'}">${typeLabel(h.trade_type)}</span></td>
       <td>${fmtPrice(h.entry_price)}</td>
-      <td>${fmtPrice(h.exit_price)}</td>
+      <td>${fmtPrice(h.close_price)}</td>
       <td class="${pnl>=0?'green':'red'}">${(pnl>=0?'+':'')+pnl.toFixed(2)}%</td>
-      <td>${h.result==='win'?'✅':'❌'}</td>
-      <td>${h.entry_time ? fmtTime(h.entry_time) : '-'}</td>
-      <td>${h.exit_time  ? fmtTime(h.exit_time)  : '-'}</td>
+      <td>${pnl>=0?'✅':'❌'} ${h.close_reason||''}</td>
+      <td>${h.activated_at ? fmtTimeISO(h.activated_at) : '-'}</td>
+      <td>${h.closed_at   ? fmtTimeISO(h.closed_at)    : '-'}</td>
     </tr>`;
   }).join('');
 }
 
-// ── Helper Cell Functions ──
+// ── 셀 헬퍼 ──
 function kCell(v) {
   if (v == null) return '<span style="color:var(--muted)">-</span>';
   const n = parseFloat(v);
   let cls = 'k-high';
-  if (n <= 2)       cls = 'k-extreme';
+  if      (n <= 2)  cls = 'k-extreme';
   else if (n <= 20) cls = 'k-low';
   else if (n <= 50) cls = 'k-mid';
   else if (n >= 80) cls = 'k-over';
@@ -731,33 +686,28 @@ function kCell(v) {
 
 function h4kCell(v) {
   if (v == null) return '<span style="color:var(--muted)">-</span>';
-  const n = parseFloat(v);
-  let icon = '';
-  if      (n >= 80) icon = '🔥';
-  else if (n >= 60) icon = '⚠';
+  const n    = parseFloat(v);
+  const icon = n >= 80 ? '🔥' : n >= 60 ? '⚠' : '';
   return kCell(v) + (icon ? `<span style="font-size:11px">${icon}</span>` : '');
 }
 
 function dirIcon(di) {
   if (!di) return '<span style="color:var(--muted)">-</span>';
-  // 문자열 레거시 처리
   if (typeof di === 'string') {
-    const s = di.replace('!','');
-    if (s.includes('GX') || s.includes('✨')) return `<span class="dir-gx">✨GX</span>`;
+    const s = di.replace('!', '');
+    if (s.includes('GX') || s.includes('✨')) return '<span class="dir-gx">✨GX</span>';
     if (s.includes('↑')) return `<span class="dir-up">${s}</span>`;
     if (s.includes('↓')) return `<span class="dir-down">${s}</span>`;
     return `<span class="dir-side">${s}</span>`;
   }
-  // 객체 처리
-  let icon = '';
   const dir = di.direction || di.dir || '';
   const gx  = di.golden_cross || di.gx || false;
-  if (gx) return `<span class="dir-gx">✨GX</span>`;
+  if (gx) return '<span class="dir-gx">✨GX</span>';
   const map = {'상승':'↑','반등':'↗','횡보':'→','하락':'↓',
                'up':'↑','recovery':'↗','sideways':'→','down':'↓'};
-  icon = map[dir] || dir || '-';
-  const cls = (dir==='상승'||dir==='반등'||dir==='up'||dir==='recovery')
-              ? 'dir-up' : (dir==='하락'||dir==='down') ? 'dir-down' : 'dir-side';
+  const icon = map[dir] || dir || '-';
+  const cls  = (dir==='상승'||dir==='반등'||dir==='up'||dir==='recovery') ? 'dir-up'
+             : (dir==='하락'||dir==='down') ? 'dir-down' : 'dir-side';
   return `<span class="${cls}">${icon}</span>`;
 }
 
@@ -765,11 +715,11 @@ function dirCell(d, h4, h1) {
   return dirIcon(d) + dirIcon(h4) + dirIcon(h1);
 }
 
-function esHtml(es, h4k) {
-  const lvl = typeof es==='object' ? (es.level??es.strength??0) : (es??0);
-  const labels = ['⏳ 대기','👀 관찰','🎯 준비','🚀 강신호'];
-  const clss   = ['es-wait','es-watch','es-target','es-strong'];
-  const idx    = Math.max(0, Math.min(3, Math.round(lvl)));
+function esHtml(lvl, h4k) {
+  const level    = parseInt(lvl) || 0;
+  const labels   = ['⏳ 대기','👀 관찰','🎯 준비','🚀 강신호'];
+  const clss     = ['es-wait','es-watch','es-target','es-strong'];
+  const idx      = Math.max(0, Math.min(3, level));
   const overheat = (parseFloat(h4k)||0) >= 80
     ? '<br><span class="es-overheat">⚠ 4hK과열</span>' : '';
   return `<span class="${clss[idx]}">${labels[idx]}</span>${overheat}`;
@@ -789,29 +739,20 @@ function deltaCell(hist) {
 }
 
 function sparkline(data, w=60, h=20) {
-  if (!data || data.length === 0)
-    return '<span style="color:var(--muted);font-size:10px">-</span>';
-  if (data.length === 1)
-    return '<span style="color:var(--muted);font-size:14px">○</span>';
-  const mn = Math.min(...data), mx = Math.max(...data);
+  if (!data || data.length === 0) return '<span style="color:var(--muted);font-size:10px">-</span>';
+  if (data.length === 1)          return '<span style="color:var(--muted);font-size:14px">○</span>';
+  const mn  = Math.min(...data), mx = Math.max(...data);
   const rng = mx - mn || 1;
-  const pts = data.map((v,i)=>{
-    const x = (i/(data.length-1))*w;
-    const y = h - ((v-mn)/rng)*(h-2) - 1;
+  const pts = data.map((v,i) => {
+    const x = (i / (data.length-1)) * w;
+    const y = h - ((v - mn) / rng) * (h - 2) - 1;
     return `${x},${y}`;
   }).join(' ');
-  return `<svg width="${w}" height="${h}" class="sparkline">
-    <polyline points="${pts}" fill="none" stroke="var(--blue)" stroke-width="1.5"/>
-  </svg>`;
+  return `<svg width="${w}" height="${h}"><polyline points="${pts}" fill="none" stroke="var(--blue)" stroke-width="1.5"/></svg>`;
 }
 
 function typeLabel(t) {
-  return {auto:'자동',manual:'👆 수동',deep:'🔴 DEEP'}[t] || t || '자동';
-}
-
-function calcPnl(entry, cur) {
-  if (!entry || !cur) return 0;
-  return (cur - entry) / entry * 100;
+  return {normal:'자동', manual:'👆 수동', deep:'🔴 DEEP'}[t] || t || '자동';
 }
 
 function fmtPrice(v) {
@@ -819,20 +760,22 @@ function fmtPrice(v) {
   return Number(v).toLocaleString('ko-KR');
 }
 
-function fmtTime(ts) {
-  if (!ts) return '-';
-  const d = new Date(ts * 1000);
+function fmtTimeISO(iso) {
+  if (!iso) return '-';
+  const d = new Date(iso);
   return (d.getMonth()+1).toString().padStart(2,'0') + '/' +
-         d.getDate().toString().padStart(2,'0') + ' ' +
-         d.getHours().toString().padStart(2,'0') + ':' +
-         d.getMinutes().toString().padStart(2,'0');
+          d.getDate().toString().padStart(2,'0') + ' ' +
+          d.getHours().toString().padStart(2,'0') + ':' +
+          d.getMinutes().toString().padStart(2,'0');
 }
 
-function timeLeft(ts) {
-  const diff = ts - Date.now()/1000;
+function timeLeft(iso) {
+  if (!iso) return '-';
+  const diff = new Date(iso) - Date.now();
   if (diff <= 0) return '<span class="red">만료</span>';
-  const h = Math.floor(diff/3600), m = Math.floor((diff%3600)/60);
-  return h>0 ? `${h}h${m}m` : `${m}분전`;
+  const h = Math.floor(diff / 3600000);
+  const m = Math.floor((diff % 3600000) / 60000);
+  return h > 0 ? `${h}h${m}m` : `${m}분`;
 }
 
 function setText(id, v) {
@@ -840,25 +783,24 @@ function setText(id, v) {
   if (el) el.textContent = v;
 }
 
-// ── Tab ──
 function switchTab(tab) {
   currentTab = tab;
   ['watch','active','deep','new','history'].forEach(t => {
-    document.getElementById('tab-'+t).classList.toggle('active', t===tab);
-    const p = document.getElementById('pane-'+t);
-    if (p) p.style.display = t===tab ? '' : 'none';
+    document.getElementById('tab-' + t).classList.toggle('active', t === tab);
+    const p = document.getElementById('pane-' + t);
+    if (p) p.style.display = t === tab ? '' : 'none';
   });
-  if (tab==='new') startCountdown();
+  if (tab === 'new') startCountdown();
   else stopCountdown();
 }
 
 function startCountdown() {
   stopCountdown();
   nextScanSec = 300;
-  countdownTimer = setInterval(()=>{
+  countdownTimer = setInterval(() => {
     nextScanSec--;
     if (nextScanSec < 0) nextScanSec = 300;
-    const m = Math.floor(nextScanSec/60), s = nextScanSec%60;
+    const m = Math.floor(nextScanSec / 60), s = nextScanSec % 60;
     setText('nextScanCountdown', `다음 스캔: ${m}:${s.toString().padStart(2,'0')}`);
   }, 1000);
 }
@@ -866,7 +808,6 @@ function stopCountdown() {
   if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
 }
 
-// ── Init ──
 fetchState();
 setInterval(fetchState, 15000);
 </script>
@@ -874,7 +815,7 @@ setInterval(fetchState, 15000);
 </html>
 """
 
-# ── Flask Routes ──
+# ── Flask Routes ──────────────────────────────────────────────
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
@@ -883,10 +824,12 @@ def index():
 def api_state():
     with scanner._state_lock:
         s = dict(scanner.scanner_state)
+    # 히스토리는 파일에서 직접 읽기
+    s['trade_history'] = scanner.load_trade_history()
     s['versions'] = {
         'dashboard': DASHBOARD_VERSION,
-        'scanner':   getattr(scanner,   'VERSION', 'v2.4.3'),
-        'mtf_setup': getattr(mtf_setup, 'VERSION', 'v4.2.3'),
+        'scanner':   getattr(scanner,   'VERSION', '-'),
+        'mtf_setup': getattr(mtf_setup, 'VERSION', '-'),
     }
     return jsonify(s)
 
@@ -894,48 +837,44 @@ def api_state():
 def api_version():
     return jsonify({
         'dashboard': DASHBOARD_VERSION,
-        'scanner':   getattr(scanner,   'VERSION', 'v2.4.3'),
-        'mtf_setup': getattr(mtf_setup, 'VERSION', 'v4.2.3'),
+        'scanner':   getattr(scanner,   'VERSION', '-'),
+        'mtf_setup': getattr(mtf_setup, 'VERSION', '-'),
     })
 
 @app.route('/api/scan', methods=['POST'])
 def api_scan():
-    threading.Thread(target=scanner.run_single_scan, daemon=True).start()
+    # scanner.manual_scan() → _scan_trigger.set() 호출
+    scanner.manual_scan()
     return jsonify({'success': True})
 
 @app.route('/api/watch/add', methods=['POST'])
 def api_watch_add():
-    data   = request.get_json()
-    ticker = data.get('ticker','').upper()
+    data   = request.get_json() or {}
+    ticker = data.get('ticker', '').upper()
     if not ticker:
         return jsonify({'success': False, 'message': '티커 없음'})
-    result = scanner.manual_add_watch(ticker)
-    return jsonify(result)
+    return jsonify(scanner.add_manual_watch(ticker))
 
 @app.route('/api/watch/remove', methods=['POST'])
 def api_watch_remove():
-    data   = request.get_json()
-    ticker = data.get('ticker','').upper()
-    result = scanner.manual_remove_watch(ticker)
-    return jsonify(result)
+    data   = request.get_json() or {}
+    ticker = data.get('ticker', '').upper()
+    return jsonify(scanner.remove_watch(ticker))
 
 @app.route('/api/watch/activate', methods=['POST'])
 def api_watch_activate():
-    data   = request.get_json()
-    ticker = data.get('ticker','').upper()
-    result = scanner.manual_activate_watch(ticker)
-    return jsonify(result)
+    data   = request.get_json() or {}
+    ticker = data.get('ticker', '').upper()
+    return jsonify(scanner.manual_activate_watch(ticker))
 
 @app.route('/api/active/close', methods=['POST'])
 def api_active_close():
-    data   = request.get_json()
-    ticker = data.get('ticker','').upper()
-    result = scanner.manual_close_trade(ticker)
-    return jsonify(result)
+    data   = request.get_json() or {}
+    ticker = data.get('ticker', '').upper()
+    return jsonify(scanner.manual_close_trade(ticker))
 
 @app.route('/api/reset/watchlist', methods=['POST'])
 def api_reset_watchlist():
-    import os
     try:
         if os.path.exists(scanner.WATCH_LIST_FILE):
             os.remove(scanner.WATCH_LIST_FILE)
@@ -949,9 +888,21 @@ def api_reset_watchlist():
 
 @app.route('/api/config')
 def api_config():
-    return jsonify(mtf_setup.get_module_config())
+    cfg = getattr(mtf_setup, 'get_module_config', lambda: {})()
+    return jsonify(cfg)
 
+# ── 실행 진입점 ───────────────────────────────────────────────
 if __name__ == '__main__':
-    scanner.start_background_tasks()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)),
-            debug=False, use_reloader=False)
+    threads = [
+        threading.Thread(target=scanner.scanner_loop,        daemon=True, name='scanner_loop'),
+        threading.Thread(target=scanner.watch_rescan_loop,   daemon=True, name='watch_rescan'),
+        threading.Thread(target=scanner.price_check_loop,    daemon=True, name='price_check'),
+        threading.Thread(target=scanner.active_monitor_loop, daemon=True, name='active_monitor'),
+        threading.Thread(target=scanner.daily_summary_loop,  daemon=True, name='daily_summary'),
+    ]
+    for t in threads:
+        t.start()
+    print(f'✅ Dashboard {DASHBOARD_VERSION} + Scanner {scanner.VERSION} 시작')
+
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
