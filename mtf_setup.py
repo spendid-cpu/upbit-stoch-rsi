@@ -9,7 +9,6 @@ mtf_setup.py — Upbit MTF Stochastic RSI Analysis Module (v4.0)
 """
 
 import os
-import numpy as np
 
 # ── 버전 ──────────────────────────────────────────
 VERSION = "4.0.0"
