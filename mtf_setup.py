@@ -327,6 +327,14 @@ def calc_watch_score(
     elif score >= GRADE_B_THRESHOLD: grade = 'B'
     else:                            grade = 'C'
 
+    # daily_k 명시적 추출
+    daily_short = daily_presets.get('short', {})
+    dk_val = daily_short.get('k', float('nan'))
+    h4_short = h4_presets.get('short', {}) if h4_presets else {}
+    hk_val = h4_short.get('k', float('nan'))
+    h1_short = h1_presets.get('short', {}) if h1_presets else {}
+    lk_val = h1_short.get('k', float('nan'))
+
     return {
         'score':      score,
         'grade':      grade,
@@ -334,9 +342,9 @@ def calc_watch_score(
         'daily_dir':  daily_dir,
         'h4_dir':     h4_dir,
         'h1_dir':     h1_dir,
-        'daily_k':    round(dk, 2) if dk == dk else None,
-        'h4_k':       round(hk, 2) if hk == hk else None,
-        'h1_k':       round(lk, 2) if lk == lk else None,
+        'daily_k':    round(dk_val, 2) if dk_val == dk_val else None,
+        'h4_k':       round(hk_val, 2) if hk_val == hk_val else None,
+        'h1_k':       round(lk_val, 2) if lk_val == lk_val else None,
     }
 
 
