@@ -1,992 +1,876 @@
-# -*- coding: utf-8 -*-
 """
-dashboard.py — Upbit MTF 스캐너 대시보드
-Version : v2.4.0
-Changelog:
-  v2.4.0 - DEEP Watch 전용 UI 추가
-           DEEP 배지 (💎), DEEP 카드, DEEP 통계
-           Active 테이블에 DEEP 구분 표시
-           BTC 24h 변화율 표시
-           진입강도 등급 상한 완전 제거 (순수 방향 기반)
-           해석표 범례 업데이트
-  v2.3.1 - dirIcon null 방어, 스파크라인, MED 버그 수정
+dashboard.py v2.4.1
+Upbit MTF 스캐너 대시보드
+
+변경사항 (v2.4.1):
+- 진입강도 범례: 등급+강도 조합 해석표 표시
+- 4hK 과열 시 진입강도 1단계 하향 반영 (UI 표시)
+- ELF 케이스: 일봉K≤2 극단 과매도 최소 레벨2 보장
+- dirIcon: null/undefined 안전 처리
+- sparkline: 추세 컬럼에 점수 이력 차트 통합
+- GX 아이콘 ✨GX 포맷 통일
+- DEEP 탭: scanner_state.deep_watch 없어도 active_trades 필터로 표시
+- DEEP 정보 패널, DEEP 테이블 렌더링 수정
+- Watch/Active/DEEP 탭 항상 렌더링 (데이터 없으면 빈 테이블)
 """
 
-import threading
-import logging
+import json
 import os
-from flask import Flask, jsonify, request, render_template_string
-import scanner
-import mtf_setup
+from datetime import datetime, timezone
 
-log = logging.getLogger(__name__)
+from flask import Flask, jsonify, render_template_string, request
+
+import scanner
+
 app = Flask(__name__)
 
-HTML = """
+
+# ── HTML 템플릿 ───────────────────────────────────────────────
+HTML = r"""
 <!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Upbit MTF Scanner v2.4.0</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upbit MTF Scanner {{ version }}</title>
 <style>
   :root {
-    --bg:      #0d1117;
-    --card:    #161b22;
-    --border:  #30363d;
-    --text:    #e6edf3;
-    --muted:   #8b949e;
-    --green:   #3fb950;
-    --red:     #f85149;
-    --orange:  #f0883e;
-    --yellow:  #d29922;
-    --blue:    #58a6ff;
-    --lime:    #7ee787;
-    --purple:  #bc8cff;
-    --deep:    #58a6ff;
+    --bg: #0f1117; --card: #1a1d27; --border: #2a2d3e;
+    --text: #e2e8f0; --muted: #64748b; --accent: #6366f1;
+    --green: #22c55e; --red: #ef4444; --yellow: #f59e0b;
+    --orange: #f97316; --blue: #3b82f6; --purple: #a855f7;
+    --deep: #ec4899;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; font-size: 13px; }
+  a { color: var(--accent); text-decoration: none; }
 
-  .header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .header h1 { font-size: 16px; font-weight: 700; }
-  .version-badge { background: var(--blue); color: #000; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
-  .deep-badge    { background: #1a2a4a; color: var(--purple); padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; border: 1px solid var(--purple); }
+  /* 헤더 */
+  .header { background: var(--card); border-bottom: 1px solid var(--border);
+            padding: 12px 20px; display: flex; align-items: center; gap: 16px; }
+  .header h1 { font-size: 18px; font-weight: 700; }
+  .header .status-badge { padding: 3px 10px; border-radius: 12px; font-size: 11px;
+                          font-weight: 600; background: #22c55e22; color: var(--green); }
+  .header .status-badge.scanning { background: #f59e0b22; color: var(--yellow); }
+  .header .status-badge.error    { background: #ef444422; color: var(--red); }
+  .header .btn { padding: 5px 14px; border-radius: 6px; border: 1px solid var(--border);
+                 background: var(--card); color: var(--text); cursor: pointer; font-size: 12px; }
+  .header .btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .header .spacer { flex: 1; }
 
-  .container { padding: 16px 20px; }
+  /* 요약 카드 */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+           gap: 12px; padding: 16px 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+          padding: 14px 16px; }
+  .card .label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+  .card .value { font-size: 22px; font-weight: 700; }
+  .card .sub   { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .card.deep-card .value { color: var(--deep); }
 
-  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
-  .card.deep-card { border-color: var(--purple); background: #0f111a; }
-  .card-label { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
-  .card-value { font-size: 22px; font-weight: 700; }
-  .card-sub   { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  /* 등급별 승률 */
+  .grade-bars { display: flex; gap: 10px; padding: 0 20px 16px; flex-wrap: wrap; }
+  .grade-bar-item { background: var(--card); border: 1px solid var(--border);
+                    border-radius: 8px; padding: 10px 14px; min-width: 130px; }
+  .grade-bar-item .g-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+  .grade-bar-item .g-bar-bg { background: #ffffff15; border-radius: 4px; height: 6px; margin: 4px 0; }
+  .grade-bar-item .g-bar-fill { height: 6px; border-radius: 4px; background: var(--accent); }
+  .grade-bar-item .g-stats { font-size: 11px; color: var(--muted); }
 
-  .grade-bar-wrap { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
-  .grade-bar-row  { display: flex; align-items: center; gap: 6px; font-size: 11px; }
-  .grade-bar-bg   { flex: 1; background: var(--border); border-radius: 3px; height: 7px; }
-  .grade-bar-fill { height: 7px; border-radius: 3px; transition: width .5s; }
+  /* DEEP 정보 패널 */
+  .deep-info-panel { margin: 0 20px 16px; background: #ec489915;
+                     border: 1px solid #ec489950; border-radius: 10px; padding: 14px 18px; }
+  .deep-info-panel h3 { color: var(--deep); font-size: 14px; margin-bottom: 10px; }
+  .deep-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+  .deep-info-item .d-label { font-size: 11px; color: var(--muted); }
+  .deep-info-item .d-value { font-size: 16px; font-weight: 700; color: var(--deep); }
 
-  .badge         { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
-  .badge-red     { background: #3d1515; color: var(--red); }
-  .badge-orange  { background: #3d2a0f; color: var(--orange); }
-  .badge-blue    { background: #1f3a5f; color: var(--blue); }
-  .badge-gray    { background: #21262d; color: var(--muted); }
-  .badge-green   { background: #1a3d2b; color: var(--green); }
-  .badge-purple  { background: #1a1a3a; color: var(--purple); border: 1px solid var(--purple); }
-  .badge-deep-s  { background: #2a0f3d; color: #e879f9; border: 1px solid #e879f9; }
-  .badge-deep-a  { background: #0f1f3d; color: var(--blue); border: 1px solid var(--blue); }
-  .badge-deep-b  { background: #1a1a3d; color: var(--purple); border: 1px solid var(--purple); }
+  /* 탭 */
+  .tabs { display: flex; gap: 0; padding: 0 20px; border-bottom: 1px solid var(--border); }
+  .tab  { padding: 10px 18px; cursor: pointer; border-bottom: 2px solid transparent;
+          font-size: 13px; color: var(--muted); transition: all .15s; }
+  .tab.active  { color: var(--text); border-bottom-color: var(--accent); }
+  .tab:hover   { color: var(--text); }
+  .tab.deep-tab { color: var(--deep); }
+  .tab.deep-tab.active { border-bottom-color: var(--deep); }
 
-  .tbl-wrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th { background: #0d1117; color: var(--muted); padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; font-weight: 600; }
-  td { padding: 6px 8px; border-bottom: 1px solid #21262d; white-space: nowrap; vertical-align: middle; }
-  tr:hover td  { background: #1c2128; }
-  tr.deep-row  { background: #0a0d14; }
-  tr.deep-row:hover td { background: #101520; }
-
-  .k-extreme { color: var(--red);    font-weight: 700; }
-  .k-low     { color: var(--orange); font-weight: 600; }
-  .k-mid     { color: var(--yellow); }
-  .k-normal  { color: var(--muted);  }
-
-  .dir-up   { color: var(--green);  font-weight: 700; }
-  .dir-rise { color: var(--lime);   }
-  .dir-side { color: var(--muted);  }
-  .dir-down { color: var(--red);    }
-  .dir-gold { color: var(--yellow); font-weight: 700; }
-
-  .es-3 { color: var(--green);  font-weight: 700; }
-  .es-2 { color: var(--lime);   font-weight: 600; }
-  .es-1 { color: var(--yellow); }
-  .es-0 { color: var(--muted);  }
-
-  .pnl-pos { color: var(--green); font-weight: 600; }
-  .pnl-neg { color: var(--red);   font-weight: 600; }
-  .pnl-neu { color: var(--muted); }
-
-  .sc-up   { color: var(--green); }
-  .sc-down { color: var(--red);   }
-  .sc-neu  { color: var(--muted); }
-
-  .deep-score { color: var(--purple); font-weight: 700; font-size: 13px; }
-  .deep-rel   { color: var(--lime);   font-weight: 600; }
-  .deep-vol   { color: var(--blue);   }
-
-  .spark { display: inline-flex; align-items: flex-end; gap: 1px; height: 16px; vertical-align: middle; margin-left: 4px; }
-  .spark-bar { width: 3px; background: var(--blue); border-radius: 1px; min-height: 2px; opacity: .75; }
-
-  .btn       { padding: 4px 10px; border-radius: 5px; border: none; cursor: pointer; font-size: 11px; font-weight: 600; }
-  .btn-scan  { background: var(--blue);   color: #000; }
-  .btn-del   { background: #3d1515;       color: var(--red); }
-  .btn-close { background: #1a3d2b;       color: var(--green); }
-  .btn:hover { opacity: .85; }
-
-  .input-row { display: flex; gap: 8px; margin-bottom: 10px; }
-  input[type=text] { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 5px 10px; border-radius: 5px; font-size: 12px; width: 180px; }
-
-  .dot        { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-  .dot-green  { background: var(--green); }
-  .dot-orange { background: var(--orange); animation: pulse .8s infinite; }
-  .dot-red    { background: var(--red); }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-
-  #msg { padding: 6px 12px; border-radius: 5px; margin-bottom: 10px; font-size: 12px; display: none; }
-  .msg-ok  { background: #1a3d2b; color: var(--green); }
-  .msg-err { background: #3d1515; color: var(--red);   }
-
-  .timestamps { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; font-size: 11px; color: var(--muted); }
-
-  .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
-  .tab { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--muted); cursor: pointer; font-size: 12px; transition: all .2s; }
-  .tab.active { background: var(--blue); color: #000; border-color: var(--blue); font-weight: 700; }
-  .tab.deep-tab { border-color: var(--purple); color: var(--purple); }
-  .tab.deep-tab.active { background: var(--purple); color: #000; }
-  .tab-content { display: none; }
+  /* 탭 콘텐츠 */
+  .tab-content { display: none; padding: 16px 20px; }
   .tab-content.active { display: block; }
 
-  .legend { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; font-size: 11px; color: var(--muted); background: var(--card); padding: 10px 14px; border-radius: 6px; border: 1px solid var(--border); }
-  .legend-title { color: var(--text); font-weight: 600; }
+  /* 진입강도 범례 */
+  .legend { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+            padding: 10px 16px; margin-bottom: 14px; font-size: 11px; color: var(--muted); }
+  .legend .legend-title { font-weight: 600; color: var(--text); margin-bottom: 8px; }
+  .legend-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 4px 16px; }
+  .legend-row  { display: flex; gap: 8px; align-items: center; }
+  .legend-row .es { min-width: 80px; }
+  .legend-row .combo { color: var(--text); }
 
-  /* DEEP 전용 정보 패널 */
-  .deep-info { background: #0a0d14; border: 1px solid var(--purple); border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 11px; }
-  .deep-info-title { color: var(--purple); font-weight: 700; margin-bottom: 6px; font-size: 12px; }
-  .deep-info-row { display: flex; gap: 16px; flex-wrap: wrap; }
-  .deep-info-item { display: flex; flex-direction: column; gap: 2px; }
-  .deep-info-label { color: var(--muted); }
-  .deep-info-value { color: var(--purple); font-weight: 600; }
+  /* 테이블 */
+  .tbl-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  thead th { background: #ffffff08; padding: 8px 10px; text-align: left;
+             border-bottom: 1px solid var(--border); white-space: nowrap;
+             font-size: 11px; color: var(--muted); font-weight: 600; }
+  tbody tr { border-bottom: 1px solid #ffffff08; transition: background .1s; }
+  tbody tr:hover { background: #ffffff05; }
+  tbody td { padding: 8px 10px; vertical-align: middle; white-space: nowrap; }
+
+  /* 배지 */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
+           font-size: 11px; font-weight: 700; }
+  .badge-S    { background: #f59e0b22; color: #f59e0b; }
+  .badge-A    { background: #6366f122; color: #818cf8; }
+  .badge-B    { background: #22c55e22; color: #4ade80; }
+  .badge-C    { background: #ffffff10; color: var(--muted); }
+  .badge-deep-s { background: #ec489930; color: var(--deep); }
+  .badge-deep-a { background: #ec489920; color: #f472b6; }
+  .badge-deep-b { background: #ec489910; color: #fda4af; }
+
+  /* K값 색상 */
+  .k-red    { color: #ef4444; font-weight: 700; }
+  .k-orange { color: #f97316; font-weight: 600; }
+  .k-yellow { color: #f59e0b; }
+  .k-white  { color: var(--text); }
+
+  /* 진입강도 */
+  .es-3 { color: #22c55e; font-weight: 700; }
+  .es-2 { color: #6366f1; }
+  .es-1 { color: #64748b; }
+  .es-0 { color: #374151; }
+
+  /* PnL */
+  .pnl-pos { color: var(--green); font-weight: 600; }
+  .pnl-neg { color: var(--red);   font-weight: 600; }
+
+  /* 스파크라인 */
+  .sparkline-wrap { display: inline-block; vertical-align: middle; }
+  .sparkline-wrap svg { display: block; }
+
+  /* 방향 */
+  .dir-icon { font-size: 12px; }
+  .dir-up   { color: var(--green); }
+  .dir-mid  { color: var(--yellow); }
+  .dir-down { color: var(--red); }
+  .dir-gx   { color: var(--yellow); font-weight: 700; }
+
+  /* 수동 입력 */
+  .add-form { display: flex; gap: 8px; margin-bottom: 14px; }
+  .add-form input { background: var(--card); border: 1px solid var(--border);
+                    border-radius: 6px; padding: 7px 12px; color: var(--text);
+                    font-size: 13px; width: 200px; }
+  .add-form input:focus { outline: none; border-color: var(--accent); }
+
+  /* 히스토리 탭 */
+  .hist-type-activate { color: var(--blue); }
+  .hist-type-close    { color: var(--muted); }
+  .hist-type-deep     { color: var(--deep); }
+
+  /* 반응형 */
+  @media (max-width: 768px) {
+    .cards { grid-template-columns: repeat(2, 1fr); }
+    .header h1 { font-size: 15px; }
+  }
 </style>
 </head>
 <body>
 
+<!-- 헤더 -->
 <div class="header">
-  <h1>📡 Upbit MTF Scanner</h1>
-  <span class="version-badge">v2.4.0</span>
-  <span class="deep-badge">💎 DEEP</span>
-  <span id="statusDot" class="dot dot-green" style="margin-left:auto"></span>
-  <span id="statusTxt" style="font-size:11px;color:var(--muted);margin-right:8px">idle</span>
-  <button class="btn btn-scan" onclick="manualScan()">🔄 수동스캔</button>
+  <h1>📊 Upbit MTF Scanner</h1>
+  <span id="statusBadge" class="status-badge">●  idle</span>
+  <span class="spacer"></span>
+  <span id="lastScan" style="font-size:11px;color:var(--muted)"></span>
+  <button class="btn" onclick="triggerScan()">🔄 수동 스캔</button>
 </div>
 
-<div class="container">
-  <div id="msg"></div>
-
-  <!-- 요약 카드 -->
-  <div class="cards">
-    <div class="card">
-      <div class="card-label">Watch 종목</div>
-      <div class="card-value" id="cWatchCnt">-</div>
-      <div class="card-sub"  id="cWatchSub">-</div>
-    </div>
-    <div class="card deep-card">
-      <div class="card-label">💎 DEEP Watch</div>
-      <div class="card-value" id="cDeepCnt" style="color:var(--purple)">-</div>
-      <div class="card-sub"  id="cDeepSub">-</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Active 종목</div>
-      <div class="card-value" id="cActiveCnt">-</div>
-      <div class="card-sub"  id="cActiveSub">-</div>
-    </div>
-    <div class="card">
-      <div class="card-label">승률 (전체)</div>
-      <div class="card-value" id="cWinRate">-</div>
-      <div class="card-sub"  id="cWinSub">-</div>
-    </div>
-    <div class="card deep-card">
-      <div class="card-label">💎 DEEP 승률</div>
-      <div class="card-value" id="cDeepWinRate" style="color:var(--purple)">-</div>
-      <div class="card-sub"  id="cDeepWinSub">-</div>
-    </div>
-    <div class="card">
-      <div class="card-label">평균 PnL</div>
-      <div class="card-value" id="cAvgPnl">-</div>
-      <div class="card-sub"  id="cPnlSub">-</div>
-    </div>
-    <div class="card">
-      <div class="card-label">BTC 주봉MA20</div>
-      <div class="card-value" id="cBtcWeekly" style="font-size:15px">-</div>
-      <div class="card-sub"  id="cBtcInfo">-</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Watch 전환율</div>
-      <div class="card-value" id="cConvRate">-</div>
-      <div class="card-sub"  id="cAvgWatch">-</div>
-    </div>
+<!-- 요약 카드 -->
+<div class="cards">
+  <div class="card">
+    <div class="label">Watch</div>
+    <div class="value" id="cardWatch">-</div>
+    <div class="sub" id="cardWatchSub"></div>
   </div>
-
-  <!-- 등급별 승률 바 -->
-  <div class="card" style="margin-bottom:12px">
-    <div class="card-label" style="margin-bottom:8px">등급별 승률</div>
-    <div class="grade-bar-wrap">
-      <div class="grade-bar-row">
-        <span style="width:50px;color:#e879f9">DEEP-S</span>
-        <div class="grade-bar-bg"><div class="grade-bar-fill" id="barDS" style="width:0%;background:#e879f9"></div></div>
-        <span id="lblDS" style="min-width:32px">0%</span>
-        <span id="cntDS" style="color:var(--muted);font-size:10px"></span>
-      </div>
-      <div class="grade-bar-row">
-        <span style="width:50px;color:var(--blue)">DEEP-A</span>
-        <div class="grade-bar-bg"><div class="grade-bar-fill" id="barDA" style="width:0%;background:var(--blue)"></div></div>
-        <span id="lblDA" style="min-width:32px">0%</span>
-        <span id="cntDA" style="color:var(--muted);font-size:10px"></span>
-      </div>
-      <div class="grade-bar-row">
-        <span style="width:50px;color:var(--red)">S</span>
-        <div class="grade-bar-bg"><div class="grade-bar-fill" id="barS" style="width:0%;background:var(--red)"></div></div>
-        <span id="lblS" style="min-width:32px">0%</span>
-        <span id="cntS" style="color:var(--muted);font-size:10px"></span>
-      </div>
-      <div class="grade-bar-row">
-        <span style="width:50px;color:var(--orange)">A</span>
-        <div class="grade-bar-bg"><div class="grade-bar-fill" id="barA" style="width:0%;background:var(--orange)"></div></div>
-        <span id="lblA" style="min-width:32px">0%</span>
-        <span id="cntA" style="color:var(--muted);font-size:10px"></span>
-      </div>
-      <div class="grade-bar-row">
-        <span style="width:50px;color:var(--yellow)">B</span>
-        <div class="grade-bar-bg"><div class="grade-bar-fill" id="barB" style="width:0%;background:var(--yellow)"></div></div>
-        <span id="lblB" style="min-width:32px">0%</span>
-        <span id="cntB" style="color:var(--muted);font-size:10px"></span>
-      </div>
-    </div>
+  <div class="card">
+    <div class="label">Active</div>
+    <div class="value" id="cardActive">-</div>
+    <div class="sub" id="cardActiveSub"></div>
   </div>
+  <div class="card deep-card">
+    <div class="label">DEEP Active</div>
+    <div class="value" id="cardDeep">-</div>
+    <div class="sub">BTC 하락 중 버팀</div>
+  </div>
+  <div class="card">
+    <div class="label">승률</div>
+    <div class="value" id="cardWinRate">-</div>
+    <div class="sub" id="cardWinSub"></div>
+  </div>
+  <div class="card">
+    <div class="label">평균 PnL</div>
+    <div class="value" id="cardAvgPnl">-</div>
+    <div class="sub" id="cardPnlSub"></div>
+  </div>
+  <div class="card">
+    <div class="label">BTC MA20</div>
+    <div class="value" style="font-size:15px" id="cardBtcMa">-</div>
+    <div class="sub" id="cardBtcSub"></div>
+  </div>
+</div>
 
-  <!-- 진입강도 해석표 -->
+<!-- 등급별 승률 바 -->
+<div class="grade-bars" id="gradeBars"></div>
+
+<!-- DEEP 정보 패널 (DEEP Active 있을 때만 표시) -->
+<div id="deepInfoPanel" class="deep-info-panel" style="display:none">
+  <h3>🔴 DEEP Watch 현황</h3>
+  <div class="deep-info-grid" id="deepInfoGrid"></div>
+</div>
+
+<!-- 탭 -->
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('watch')">
+    👁 Watch <span id="tabWatchCnt"></span>
+  </div>
+  <div class="tab" onclick="switchTab('active')">
+    ⚡ Active <span id="tabActiveCnt"></span>
+  </div>
+  <div class="tab deep-tab" onclick="switchTab('deep')">
+    🔴 DEEP <span id="tabDeepCnt"></span>
+  </div>
+  <div class="tab" onclick="switchTab('new')">
+    🆕 신규 <span id="tabNewCnt"></span>
+  </div>
+  <div class="tab" onclick="switchTab('history')">
+    📜 히스토리
+  </div>
+</div>
+
+<!-- Watch 탭 -->
+<div id="tab-watch" class="tab-content active">
   <div class="legend">
-    <span class="legend-title">진입강도 + 등급 조합 해석:</span>
-    <span>S/A + 🚀 → <b style="color:var(--green)">적극 진입</b></span>
-    <span>S/A + 🎯 → <b style="color:var(--lime)">진입 준비</b></span>
-    <span>S/A + ⏳ → <b style="color:var(--yellow)">방향 대기</b></span>
-    <span>B + 🚀 → <b style="color:var(--orange)">주목 (곧 등급상승 가능)</b></span>
-    <span>B/C + ⏳ → <b style="color:var(--muted)">완전 대기</b></span>
-    <span>💎DEEP → <b style="color:var(--purple)">선진입 (반등 신호 불필요)</b></span>
-  </div>
-
-  <!-- 탭 -->
-  <div class="tabs">
-    <div class="tab active" onclick="switchTab('watch')">📋 Watch (<span id="tabWatchCnt">0</span>)</div>
-    <div class="tab deep-tab" onclick="switchTab('deep')">💎 DEEP (<span id="tabDeepCnt">0</span>)</div>
-    <div class="tab" onclick="switchTab('active')">🔵 Active (<span id="tabActiveCnt">0</span>)</div>
-    <div class="tab" onclick="switchTab('new')">🆕 신규 (<span id="tabNewCnt">0</span>)</div>
-    <div class="tab" onclick="switchTab('removed')">🗑️ 만료 (<span id="tabRemovedCnt">0</span>)</div>
-    <div class="tab" onclick="switchTab('history')">📜 히스토리</div>
-  </div>
-
-  <!-- Watch 탭 -->
-  <div class="tab-content active" id="tabWatch">
-    <div class="input-row">
-      <input type="text" id="addInput" placeholder="종목 입력 (예: CHZ)"
-             onkeydown="if(event.key==='Enter')addWatch()">
-      <button class="btn btn-scan" onclick="addWatch()">+ 추가</button>
-    </div>
-    <div class="tbl-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>종목</th><th>등급</th><th>등록점수</th><th>현재점수</th><th>변화</th>
-            <th>추세</th><th>일봉K</th><th>4hK</th><th>1hK</th>
-            <th>진입강도</th><th>등록가</th><th>현재가</th><th>수익률</th>
-            <th>등록시간</th><th>Watch시간</th><th>구분</th><th>삭제</th>
-          </tr>
-        </thead>
-        <tbody id="watchTbody"></tbody>
-      </table>
+    <div class="legend-title">📖 진입강도 해석 가이드</div>
+    <div class="legend-grid">
+      <div class="legend-row"><span class="es es-3">🚀강한신호</span><span class="combo">S/A등급 → 적극 진입 고려</span></div>
+      <div class="legend-row"><span class="es es-3">🚀강한신호</span><span class="combo">B등급 → 차트 강반등, 등급 상승 주목</span></div>
+      <div class="legend-row"><span class="es es-2">🎯진입고려</span><span class="combo">S/A등급 → 진입 준비</span></div>
+      <div class="legend-row"><span class="es es-1">👀관찰</span><span class="combo">방향 형성 중 → 관찰 유지</span></div>
+      <div class="legend-row"><span class="es es-0">⏳대기</span><span class="combo">신호 없음 → 완전 대기</span></div>
+      <div class="legend-row"><span style="color:var(--orange)">⚠ 4hK과열</span><span class="combo">4hK>80 → 진입강도 1단계 자동 하향</span></div>
     </div>
   </div>
+  <div class="add-form">
+    <input type="text" id="addInput" placeholder="KRW-BTC or BTC" onkeydown="if(event.key==='Enter')addWatch()">
+    <button class="btn" onclick="addWatch()">+ Watch 추가</button>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>티커</th><th>등급</th><th>점수</th><th>일봉K</th><th>4hK</th><th>1hK</th>
+          <th>진입강도</th><th>방향(일/4h/1h)</th><th>추세</th><th>거래량</th>
+          <th>현재가</th><th>등록일</th><th>만료</th><th>관리</th>
+        </tr>
+      </thead>
+      <tbody id="watchBody"></tbody>
+    </table>
+  </div>
+</div>
 
-  <!-- DEEP 탭 -->
-  <div class="tab-content" id="tabDeep">
-    <div class="deep-info">
-      <div class="deep-info-title">💎 DEEP Watch 조건: 일봉K≤5 + BTC 24h≤-2% + 종목이 BTC보다 3% 이상 선방</div>
-      <div class="deep-info-row" id="deepInfoRow">
-        <div class="deep-info-item">
-          <span class="deep-info-label">BTC 24h</span>
-          <span class="deep-info-value" id="deepBtcChange">-</span>
-        </div>
-        <div class="deep-info-item">
-          <span class="deep-info-label">DEEP Active (누적)</span>
-          <span class="deep-info-value" id="deepTotalCnt">-</span>
-        </div>
-        <div class="deep-info-item">
-          <span class="deep-info-label">DEEP 승률</span>
-          <span class="deep-info-value" id="deepWinRateInfo">-</span>
-        </div>
-        <div class="deep-info-item">
-          <span class="deep-info-label">DEEP 평균PnL</span>
-          <span class="deep-info-value" id="deepAvgPnl">-</span>
-        </div>
-      </div>
-    </div>
-    <div class="tbl-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>종목</th><th>DEEP등급</th><th>DEEP점수</th>
-            <th>일봉K</th><th>BTC 24h</th><th>종목 24h</th><th>상대강도</th>
-            <th>바닥일수</th><th>거래량비율</th><th>주봉K</th>
-            <th>등록가</th><th>현재가</th><th>수익률</th>
-            <th>등록시간</th><th>삭제</th>
-          </tr>
-        </thead>
-        <tbody id="deepTbody"></tbody>
-      </table>
+<!-- Active 탭 -->
+<div id="tab-active" class="tab-content">
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>티커</th><th>등급</th><th>점수</th><th>유형</th>
+          <th>진입가</th><th>현재가</th><th>PnL</th>
+          <th>TP</th><th>SL</th><th>진입강도</th><th>방향</th>
+          <th>진입일시</th><th>타임아웃</th><th>관리</th>
+        </tr>
+      </thead>
+      <tbody id="activeBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- DEEP 탭 -->
+<div id="tab-deep" class="tab-content">
+  <div class="legend" style="border-color:#ec489950">
+    <div class="legend-title" style="color:var(--deep)">🔴 DEEP Watch 란?</div>
+    <div style="margin-top:6px;line-height:1.8">
+      일봉K ≤ 5 (극단 과매도) + BTC 하락 중 + 해당 코인이 BTC보다 버티는 종목<br>
+      BTC 회복 시 강한 반등 가능성이 높은 선진입 전략<br>
+      <span style="color:var(--deep)">DEEP-S/A → 자동 Active 전환</span>
+      &nbsp;|&nbsp;
+      <span style="color:#f472b6">DEEP-B → Watch 유지</span>
     </div>
   </div>
-
-  <!-- Active 탭 -->
-  <div class="tab-content" id="tabActive">
-    <div class="tbl-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>종목</th><th>타입</th><th>등급</th><th>진입점수</th><th>진입강도</th>
-            <th>진입가</th><th>현재가</th><th>수익률</th>
-            <th>TP</th><th>SL</th><th>진입시간</th><th>보유시간</th><th>청산</th>
-          </tr>
-        </thead>
-        <tbody id="activeTbody"></tbody>
-      </table>
-    </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>티커</th><th>DEEP등급</th><th>DEEP점수</th>
+          <th>일봉K</th><th>BTC 24h</th><th>코인 24h</th><th>상대강도</th>
+          <th>바닥유지</th><th>거래량비율</th><th>주봉K</th>
+          <th>현재가</th><th>PnL</th><th>진입일시</th><th>관리</th>
+        </tr>
+      </thead>
+      <tbody id="deepBody"></tbody>
+    </table>
   </div>
+</div>
 
-  <!-- 신규 탭 -->
-  <div class="tab-content" id="tabNew">
-    <div class="tbl-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>종목</th><th>등급</th><th>점수</th><th>추세</th>
-            <th>일봉K</th><th>4hK</th><th>1hK</th><th>진입강도</th><th>등록시간</th>
-          </tr>
-        </thead>
-        <tbody id="newTbody"></tbody>
-      </table>
-    </div>
+<!-- 신규 탭 -->
+<div id="tab-new" class="tab-content">
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>티커</th><th>등급</th><th>점수</th><th>일봉K</th><th>4hK</th><th>1hK</th>
+          <th>진입강도</th><th>방향</th><th>현재가</th><th>등록일시</th>
+        </tr>
+      </thead>
+      <tbody id="newBody"></tbody>
+    </table>
   </div>
+</div>
 
-  <!-- 만료 탭 -->
-  <div class="tab-content" id="tabRemoved">
-    <div class="tbl-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>종목</th><th>등급</th><th>등록점수</th>
-            <th>등록가</th><th>최종가</th><th>수익률</th>
-          </tr>
-        </thead>
-        <tbody id="removedTbody"></tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- 히스토리 탭 -->
-  <div class="tab-content" id="tabHistory">
-    <div class="tbl-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>종목</th><th>타입</th><th>결과</th><th>등급</th>
-            <th>진입가</th><th>청산가</th><th>수익률</th>
-            <th>보유시간</th><th>청산시각</th>
-          </tr>
-        </thead>
-        <tbody id="historyTbody"></tbody>
-      </table>
-    </div>
-  </div>
-
-  <div class="timestamps">
-    <span>전체스캔: <span id="tsLastScan">-</span></span>
-    <span>Watch재스캔: <span id="tsWatchRescan">-</span></span>
-    <span>가격체크: <span id="tsPrice">-</span></span>
-    <span>Active체크: <span id="tsActive">-</span></span>
-    <span>다음스캔: <span id="tsNextScan" style="color:var(--blue)">-</span></span>
-    <span style="margin-left:auto">스캔횟수: <span id="tsScanCnt">0</span></span>
+<!-- 히스토리 탭 -->
+<div id="tab-history" class="tab-content">
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>유형</th><th>티커</th><th>등급</th><th>거래유형</th>
+          <th>진입가</th><th>청산가</th><th>PnL</th><th>사유</th><th>일시</th>
+        </tr>
+      </thead>
+      <tbody id="histBody"></tbody>
+    </table>
   </div>
 </div>
 
 <script>
-// ── 포맷 유틸 ─────────────────────────────────────────────────
-function fmt(v, dec=null) {
-  if (v == null || v === '') return '-';
-  const n = Number(v);
-  if (isNaN(n)) return '-';
-  if (dec !== null)
-    return n.toLocaleString('ko-KR', {minimumFractionDigits:dec, maximumFractionDigits:dec});
-  if (n >= 100)  return n.toLocaleString('ko-KR', {maximumFractionDigits:0});
-  if (n >= 10)   return n.toLocaleString('ko-KR', {maximumFractionDigits:1});
-  if (n >= 1)    return n.toLocaleString('ko-KR', {maximumFractionDigits:2});
-  if (n >= 0.1)  return n.toLocaleString('ko-KR', {maximumFractionDigits:3});
-  if (n >= 0.01) return n.toLocaleString('ko-KR', {maximumFractionDigits:4});
-  return n.toLocaleString('ko-KR', {maximumFractionDigits:6});
+// ── 탭 전환 ────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    const names = ['watch','active','deep','new','history'];
+    t.classList.toggle('active', names[i] === name);
+  });
+  document.querySelectorAll('.tab-content').forEach(c => {
+    c.classList.toggle('active', c.id === 'tab-' + name);
+  });
+}
+
+// ── 숫자 포맷 ──────────────────────────────────────────────
+function fmtPrice(v) {
+  if (v == null || v === 0) return '-';
+  if (v >= 1000) return Number(v).toLocaleString('ko-KR', {maximumFractionDigits:0});
+  if (v >= 1)    return Number(v).toFixed(2);
+  return Number(v).toFixed(4);
 }
 
 function fmtPct(v) {
   if (v == null) return '-';
-  const n = Number(v);
-  if (isNaN(n)) return '-';
-  const cls = n > 0 ? 'pnl-pos' : n < 0 ? 'pnl-neg' : 'pnl-neu';
-  return `<span class="${cls}">${n>=0?'+':''}${n.toFixed(2)}%</span>`;
+  const cls = v >= 0 ? 'pnl-pos' : 'pnl-neg';
+  return `<span class="${cls}">${v >= 0 ? '+' : ''}${v.toFixed(2)}%</span>`;
 }
 
 function fmtTime(iso) {
   if (!iso) return '-';
   try {
     const d = new Date(iso);
-    return `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} `
-         + `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-  } catch { return '-'; }
+    const kst = new Date(d.getTime() + 9*3600*1000);
+    const mo = String(kst.getUTCMonth()+1).padStart(2,'0');
+    const da = String(kst.getUTCDate()).padStart(2,'0');
+    const hh = String(kst.getUTCHours()).padStart(2,'0');
+    const mm = String(kst.getUTCMinutes()).padStart(2,'0');
+    return `${mo}/${da} ${hh}:${mm}`;
+  } catch(e) { return '-'; }
 }
 
-function fmtElapsed(iso) {
+function timeAgo(iso) {
   if (!iso) return '-';
   try {
-    const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-    if (diff < 60)    return `${Math.floor(diff)}초`;
-    if (diff < 3600)  return `${Math.floor(diff/60)}분`;
-    if (diff < 86400) return `${Math.floor(diff/3600)}h ${Math.floor((diff%3600)/60)}m`;
-    return `${Math.floor(diff/86400)}일 ${Math.floor((diff%86400)/3600)}h`;
-  } catch { return '-'; }
+    const diff = Date.now() - new Date(iso).getTime();
+    const m = Math.floor(diff/60000);
+    if (m < 60) return m + '분전';
+    const h = Math.floor(m/60);
+    if (h < 24) return h + '시간전';
+    return Math.floor(h/24) + '일전';
+  } catch(e) { return '-'; }
 }
 
+// ── K값 셀 ────────────────────────────────────────────────
+function kCell(v) {
+  if (v == null) return '<span class="k-white">-</span>';
+  const f = parseFloat(v);
+  if (isNaN(f)) return '<span class="k-white">-</span>';
+  let cls = 'k-white';
+  if (f <= 5)  cls = 'k-red';
+  else if (f <= 10) cls = 'k-orange';
+  else if (f <= 20) cls = 'k-yellow';
+  return `<span class="${cls}">${f.toFixed(1)}</span>`;
+}
+
+function h4KCell(v) {
+  if (v == null) return '<span class="k-white">-</span>';
+  const f = parseFloat(v);
+  if (isNaN(f)) return '<span class="k-white">-</span>';
+  let cls = 'k-white';
+  if (f <= 5) cls = 'k-red';
+  else if (f <= 20) cls = 'k-orange';
+  let icon = '';
+  if (f > 80) icon = '🔥';
+  else if (f > 50) icon = '⚠';
+  return `<span class="${cls}">${f.toFixed(1)}${icon}</span>`;
+}
+
+// ── 방향 아이콘 ───────────────────────────────────────────
+function dirIcon(dirInfo) {
+  if (!dirInfo || typeof dirInfo !== 'object') return '<span class="dir-icon">-</span>';
+  const dir = dirInfo.direction || '횡보';
+  const gx  = dirInfo.golden_cross || false;
+  if (gx) return '<span class="dir-icon dir-gx">✨GX</span>';
+  const map = { '상승':'↑','반등':'↗','횡보':'→','하락':'↓' };
+  const icon = map[dir] || '?';
+  const clsMap = { '상승':'dir-up','반등':'dir-up','횡보':'dir-mid','하락':'dir-down' };
+  const cls = clsMap[dir] || 'dir-mid';
+  return `<span class="dir-icon ${cls}">${icon}</span>`;
+}
+
+function dirCell(dailyInfo, h4Info, h1Info) {
+  return dirIcon(dailyInfo) + dirIcon(h4Info) + dirIcon(h1Info);
+}
+
+// ── 진입강도 셀 ───────────────────────────────────────────
+function esCell(level, label) {
+  if (level == null) return '-';
+  const cls = ['es-0','es-1','es-2','es-3'][level] || 'es-0';
+  const lbl = label || ['⏳대기','👀관찰','🎯진입고려','🚀강한신호'][level] || '⏳대기';
+  return `<span class="${cls}">${lbl}</span>`;
+}
+
+// ── 등급 배지 ─────────────────────────────────────────────
 function gradeBadge(g) {
-  const map = {
-    'S':      'badge-red',
-    'A':      'badge-orange',
-    'B':      'badge-blue',
-    'C':      'badge-gray',
-    'DEEP-S': 'badge-deep-s',
-    'DEEP-A': 'badge-deep-a',
-    'DEEP-B': 'badge-deep-b',
-  };
-  return `<span class="badge ${map[g]||'badge-gray'}">${g||'?'}</span>`;
+  if (!g) return '-';
+  return `<span class="badge badge-${g}">${g}</span>`;
 }
 
-function scoreChangeBadge(s, c) {
-  const diff = (c||0) - (s||0);
-  if (diff > 0) return `<span class="sc-up">+${diff}↑</span>`;
-  if (diff < 0) return `<span class="sc-down">${diff}↓</span>`;
-  return `<span class="sc-neu">→</span>`;
+function deepGradeBadge(g) {
+  if (!g) return '-';
+  const cls = g.includes('S') ? 'deep-s' : g.includes('A') ? 'deep-a' : 'deep-b';
+  return `<span class="badge badge-deep-${cls}">${g}</span>`;
 }
 
-function kCell(val) {
-  if (val == null) return `<span class="k-normal">-</span>`;
-  const n = Number(val);
-  if (isNaN(n)) return `<span class="k-normal">-</span>`;
-  if (n <= 5)  return `<span class="k-extreme">${n.toFixed(1)}</span>`;
-  if (n <= 10) return `<span class="k-low">${n.toFixed(1)}</span>`;
-  if (n <= 20) return `<span class="k-mid">${n.toFixed(1)}</span>`;
-  return `<span class="k-normal">${n.toFixed(1)}</span>`;
+// ── 스파크라인 ────────────────────────────────────────────
+function sparkline(data, w=60, h=20) {
+  if (!data || data.length < 2) return '<span style="color:var(--muted);font-size:10px">-</span>';
+  const pts = data.slice(-20);
+  const mn = Math.min(...pts), mx = Math.max(...pts);
+  const range = mx - mn || 1;
+  const step = w / (pts.length - 1);
+  const points = pts.map((v, i) => {
+    const x = i * step;
+    const y = h - ((v - mn) / range) * (h - 2) - 1;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const last  = pts[pts.length - 1];
+  const first = pts[0];
+  const color = last >= first ? '#22c55e' : '#ef4444';
+  return `<div class="sparkline-wrap"><svg width="${w}" height="${h}">
+    <polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round"/>
+  </svg></div>`;
 }
 
-function h4KCell(val) {
-  if (val == null) return `<span class="k-normal">-</span>`;
-  const n = Number(val);
-  if (isNaN(n)) return `<span class="k-normal">-</span>`;
-  const icon = n > 80 ? '🔥' : n > 50 ? '⚠️' : '';
-  if (n <= 5)  return `<span class="k-extreme">${n.toFixed(1)}${icon}</span>`;
-  if (n <= 10) return `<span class="k-low">${n.toFixed(1)}${icon}</span>`;
-  if (n <= 20) return `<span class="k-mid">${n.toFixed(1)}${icon}</span>`;
-  return `<span class="k-normal">${n.toFixed(1)}${icon}</span>`;
+// ── Watch 테이블 렌더 ──────────────────────────────────────
+function renderWatch(list) {
+  const tbody = document.getElementById('watchBody');
+  if (!list || list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="14" style="text-align:center;padding:20px;color:var(--muted)">데이터 없음</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(w => {
+    const isManual = w.manual ? '👤' : '';
+    const ticker   = w.ticker || '-';
+    const name     = ticker.replace('KRW-','');
+    return `<tr>
+      <td><a href="https://upbit.com/exchange?code=CRIX.UPBIT.${ticker}" target="_blank">${isManual}${name}</a></td>
+      <td>${gradeBadge(w.grade)}</td>
+      <td>${w.score ?? '-'}</td>
+      <td>${kCell(w.daily_k)}</td>
+      <td>${h4KCell(w.h4_k)}</td>
+      <td>${kCell(w.h1_k)}</td>
+      <td>${esCell(w.entry_level, w.entry_label)}</td>
+      <td>${dirCell(w.daily_dir_info, w.h4_dir_info, w.h1_dir_info)}</td>
+      <td>${sparkline(w.score_history)}</td>
+      <td>${w.vol_ratio != null ? w.vol_ratio.toFixed(2)+'x' : '-'}</td>
+      <td>${fmtPrice(w.current_price)}</td>
+      <td>${timeAgo(w.registered_at)}</td>
+      <td>${w.expire_at ? fmtTime(w.expire_at) : '∞'}</td>
+      <td><button class="btn" style="font-size:11px;padding:2px 8px" onclick="removeWatch('${ticker}')">제거</button></td>
+    </tr>`;
+  }).join('');
 }
 
-function dirIcon(dir, golden) {
-  if (!dir || dir==='' || dir==='null') return `<span class="dir-side">-</span>`;
-  if (golden) return `<span class="dir-gold">✨GX</span>`;
-  const map = {
-    '상승':    `<span class="dir-up">↑</span>`,
-    '반등':    `<span class="dir-rise">↗</span>`,
-    '횡보':    `<span class="dir-side">→</span>`,
-    '하락':    `<span class="dir-down">↓</span>`,
-    '알수없음':`<span class="dir-side">-</span>`,
-  };
-  return map[dir] || `<span class="dir-side">-</span>`;
+// ── Active 테이블 렌더 ────────────────────────────────────
+function renderActive(list) {
+  const tbody = document.getElementById('activeBody');
+  if (!list || list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="14" style="text-align:center;padding:20px;color:var(--muted)">Active 없음</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.filter(a => (a.trade_type||'normal') === 'normal').map(a => {
+    const ticker = a.ticker || '-';
+    const name   = ticker.replace('KRW-','');
+    return `<tr>
+      <td><a href="https://upbit.com/exchange?code=CRIX.UPBIT.${ticker}" target="_blank">${name}</a></td>
+      <td>${gradeBadge(a.grade)}</td>
+      <td>${a.score ?? '-'}</td>
+      <td><span style="color:var(--blue)">${a.trade_type||'normal'}</span></td>
+      <td>${fmtPrice(a.entry_price)}</td>
+      <td>${fmtPrice(a.current_price)}</td>
+      <td>${fmtPct(a.pnl_pct)}</td>
+      <td style="color:var(--green)">${fmtPrice(a.tp_price)}</td>
+      <td style="color:var(--red)">${fmtPrice(a.sl_price)}</td>
+      <td>${esCell(a.entry_level, a.entry_label)}</td>
+      <td>${dirCell(a.daily_dir_info, a.h4_dir_info, a.h1_dir_info)}</td>
+      <td>${fmtTime(a.activated_at)}</td>
+      <td>${fmtTime(a.timeout_at)}</td>
+      <td><button class="btn" style="font-size:11px;padding:2px 8px;color:var(--red)" onclick="closeTrade('${ticker}')">청산</button></td>
+    </tr>`;
+  }).join('');
 }
 
-function dirCell(cur, history) {
-  if (!cur) return '---';
-  const d = dirIcon(cur.daily_dir, false);
-  const h = dirIcon(cur.h4_dir,   cur.h4_golden||false);
-  const l = dirIcon(cur.h1_dir,   cur.h1_golden||false);
-  return `${d}${h}${l}${sparkline(history||[])}`;
+// ── DEEP 테이블 렌더 ──────────────────────────────────────
+function renderDeep(activeList) {
+  const tbody = document.getElementById('deepBody');
+  const list  = (activeList || []).filter(a => a.trade_type === 'deep');
+  if (list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="14" style="text-align:center;padding:20px;color:var(--muted)">DEEP Active 없음<br><span style="font-size:11px">일봉K≤5 + BTC 하락 + 코인 버팀 조건 충족 시 자동 등록</span></td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(a => {
+    const ticker = a.ticker || '-';
+    const name   = ticker.replace('KRW-','');
+    const relVal = a.relative_strength;
+    const relStr = relVal != null
+      ? `<span style="color:var(--green)">+${relVal.toFixed(2)}%p</span>` : '-';
+    return `<tr>
+      <td><a href="https://upbit.com/exchange?code=CRIX.UPBIT.${ticker}" target="_blank">
+        <span style="color:var(--deep)">🔴</span>${name}
+      </a></td>
+      <td>${deepGradeBadge(a.deep_grade)}</td>
+      <td>${a.deep_score ?? '-'}</td>
+      <td>${kCell(a.daily_k)}</td>
+      <td><span style="color:var(--red)">${a.btc_change != null ? a.btc_change.toFixed(2)+'%' : '-'}</span></td>
+      <td>${a.coin_change != null ? a.coin_change.toFixed(2)+'%' : '-'}</td>
+      <td>${relStr}</td>
+      <td>${a.days_at_bottom ?? '-'}일</td>
+      <td>${a.vol_ratio != null ? a.vol_ratio.toFixed(2)+'x' : '-'}</td>
+      <td>${kCell(a.weekly_k)}</td>
+      <td>${fmtPrice(a.current_price)}</td>
+      <td>${fmtPct(a.pnl_pct)}</td>
+      <td>${fmtTime(a.activated_at)}</td>
+      <td><button class="btn" style="font-size:11px;padding:2px 8px;color:var(--red)" onclick="closeTrade('${ticker}')">청산</button></td>
+    </tr>`;
+  }).join('');
 }
 
-function esCell(es) {
-  if (!es) return `<span class="es-0">⏳ 대기</span>`;
-  const cls = ['es-0','es-1','es-2','es-3'][es.level||0] || 'es-0';
-  return `<span class="${cls}">${es.icon||'⏳'} ${es.label||'대기'}</span>`;
+// ── 신규 테이블 렌더 ─────────────────────────────────────
+function renderNew(list) {
+  const tbody = document.getElementById('newBody');
+  if (!list || list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:20px;color:var(--muted)">신규 항목 없음 (5분 후 초기화)</td></tr>';
+    return;
+  }
+  document.getElementById('tabNewCnt').textContent = `(${list.length})`;
+  tbody.innerHTML = list.map(w => {
+    const ticker = w.ticker || '-';
+    const name   = ticker.replace('KRW-','');
+    return `<tr style="background:#22c55e08">
+      <td><a href="https://upbit.com/exchange?code=CRIX.UPBIT.${ticker}" target="_blank">🆕${name}</a></td>
+      <td>${gradeBadge(w.grade)}</td>
+      <td>${w.score ?? '-'}</td>
+      <td>${kCell(w.daily_k)}</td>
+      <td>${h4KCell(w.h4_k)}</td>
+      <td>${kCell(w.h1_k)}</td>
+      <td>${esCell(w.entry_level, w.entry_label)}</td>
+      <td>${dirCell(w.daily_dir_info, w.h4_dir_info, w.h1_dir_info)}</td>
+      <td>${fmtPrice(w.current_price)}</td>
+      <td>${fmtTime(w.registered_at)}</td>
+    </tr>`;
+  }).join('');
 }
 
-function sparkline(history) {
-  if (!history || history.length < 2) return '';
-  const scores = history.slice(-10).map(h => h.score||0);
-  const maxS   = Math.max(...scores, 1);
-  return `<div class="spark">${scores.map(s=>{
-    const h = Math.max(2, Math.round(s/maxS*16));
-    return `<div class="spark-bar" style="height:${h}px"></div>`;
-  }).join('')}</div>`;
+// ── 히스토리 테이블 렌더 ──────────────────────────────────
+function renderHistory(list) {
+  const tbody = document.getElementById('histBody');
+  if (!list || list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:20px;color:var(--muted)">히스토리 없음</td></tr>';
+    return;
+  }
+  const sorted = [...list].reverse().slice(0, 100);
+  tbody.innerHTML = sorted.map(h => {
+    const typeMap = { activate:'진입', close:'청산' };
+    const typeLabel = typeMap[h.type] || h.type;
+    const cls = h.trade_type === 'deep' ? 'hist-type-deep'
+              : h.type === 'activate'   ? 'hist-type-activate'
+              : 'hist-type-close';
+    const pnl = h.pnl_pct != null ? fmtPct(h.pnl_pct) : '-';
+    const dt  = h.closed_at || h.activated_at;
+    return `<tr>
+      <td class="${cls}">${typeLabel}</td>
+      <td>${(h.ticker||'-').replace('KRW-','')}</td>
+      <td>${gradeBadge(h.grade)}</td>
+      <td>${h.trade_type||'normal'}</td>
+      <td>${fmtPrice(h.entry_price)}</td>
+      <td>${fmtPrice(h.close_price)}</td>
+      <td>${pnl}</td>
+      <td>${h.close_reason||'-'}</td>
+      <td>${fmtTime(dt)}</td>
+    </tr>`;
+  }).join('');
 }
 
-function typeBadge(type) {
-  if (type === 'deep')
-    return `<span class="badge badge-deep-s">💎DEEP</span>`;
-  return `<span class="badge badge-gray">일반</span>`;
+// ── 등급 승률 바 렌더 ────────────────────────────────────
+function renderGradeBars(gradeStats) {
+  const el = document.getElementById('gradeBars');
+  const grades = ['S','A','B','C'];
+  el.innerHTML = grades.map(g => {
+    const s   = (gradeStats || {})[g] || {};
+    const wr  = s.win_rate ?? 0;
+    const avg = s.avg_pnl  ?? 0;
+    const tot = s.total    ?? 0;
+    return `<div class="grade-bar-item">
+      <div class="g-label">${g}등급 승률</div>
+      <div class="g-bar-bg"><div class="g-bar-fill" style="width:${wr}%"></div></div>
+      <div class="g-stats">${wr}%  |  avg ${avg >= 0 ? '+' : ''}${avg}%  |  ${tot}건</div>
+    </div>`;
+  }).join('');
 }
 
-// ── 탭 전환 ──────────────────────────────────────────────────
-const TAB_NAMES = ['watch','deep','active','new','removed','history'];
-const TAB_IDS   = {
-  watch:'tabWatch', deep:'tabDeep', active:'tabActive',
-  new:'tabNew', removed:'tabRemoved', history:'tabHistory'
-};
-
-function switchTab(name) {
-  document.querySelectorAll('.tab').forEach((t, i) => {
-    t.classList.toggle('active', TAB_NAMES[i] === name);
-  });
-  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-  document.getElementById(TAB_IDS[name]).classList.add('active');
-  if (name === 'history') loadHistory();
+// ── DEEP 정보 패널 렌더 ─────────────────────────────────
+function renderDeepPanel(activeList) {
+  const panel = document.getElementById('deepInfoPanel');
+  const grid  = document.getElementById('deepInfoGrid');
+  const deepList = (activeList || []).filter(a => a.trade_type === 'deep');
+  if (deepList.length === 0) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+  const totalPnl = deepList.reduce((s, a) => s + (a.pnl_pct||0), 0);
+  const avgPnl   = totalPnl / deepList.length;
+  const winCount = deepList.filter(a => (a.pnl_pct||0) >= 0).length;
+  grid.innerHTML = `
+    <div class="deep-info-item">
+      <div class="d-label">DEEP Active 수</div>
+      <div class="d-value">${deepList.length}개</div>
+    </div>
+    <div class="deep-info-item">
+      <div class="d-label">DEEP 승률</div>
+      <div class="d-value">${deepList.length ? Math.round(winCount/deepList.length*100) : 0}%</div>
+    </div>
+    <div class="deep-info-item">
+      <div class="d-label">DEEP 평균 PnL</div>
+      <div class="d-value" style="color:${avgPnl>=0?'var(--green)':'var(--red)'}">${avgPnl>=0?'+':''}${avgPnl.toFixed(2)}%</div>
+    </div>
+    <div class="deep-info-item">
+      <div class="d-label">최고 상대강도</div>
+      <div class="d-value">${Math.max(...deepList.map(a=>a.relative_strength||0)).toFixed(2)}%p</div>
+    </div>
+  `;
 }
 
-// ── UI 업데이트 ───────────────────────────────────────────────
-function updateUI(state) {
-  const stats = state.stats || {};
-  const macro = state.macro || {};
+// ── 상태 업데이트 ─────────────────────────────────────────
+function updateState(data) {
+  // 헤더
+  const badge = document.getElementById('statusBadge');
+  badge.textContent  = '● ' + (data.status||'idle');
+  badge.className    = 'status-badge' + (data.status==='scanning'?' scanning':data.status==='error'?' error':'');
+  document.getElementById('lastScan').textContent = data.last_scan_at ? '마지막 스캔: ' + fmtTime(data.last_scan_at) : '';
 
-  const statusMap = {scanning:'dot-orange', error:'dot-red', idle:'dot-green'};
-  document.getElementById('statusDot').className =
-    'dot ' + (statusMap[state.status] || 'dot-green');
-  document.getElementById('statusTxt').textContent = state.status || 'idle';
+  // 카드
+  const stats = data.stats || {};
+  document.getElementById('cardWatch').textContent    = data.watch_count ?? '-';
+  document.getElementById('cardActive').textContent   = data.active_count ?? '-';
+  document.getElementById('cardDeep').textContent     = data.deep_count ?? 0;
+  document.getElementById('cardWinRate').textContent  = stats.win_rate != null ? stats.win_rate.toFixed(1)+'%' : '-';
+  document.getElementById('cardWinSub').textContent   = stats.total_trades ? `총 ${stats.total_trades}건` : '';
+  document.getElementById('cardAvgPnl').textContent   = stats.avg_pnl != null
+    ? (stats.avg_pnl >= 0 ? '+' : '') + stats.avg_pnl.toFixed(2) + '%' : '-';
 
-  const watchList  = state.watch_list    || [];
-  const deepList   = watchList.filter(w => w.type === 'deep');
-  const normalList = watchList.filter(w => w.type !== 'deep');
-
-  document.getElementById('cWatchCnt').textContent  = normalList.length;
-  document.getElementById('cDeepCnt').textContent   = deepList.length;
-  document.getElementById('cActiveCnt').textContent = state.active_count || 0;
-  document.getElementById('tabWatchCnt').textContent  = normalList.length;
-  document.getElementById('tabDeepCnt').textContent   = deepList.length;
-  document.getElementById('tabActiveCnt').textContent = state.active_count || 0;
-  document.getElementById('tabNewCnt').textContent     = (state.new_entries   || []).length;
-  document.getElementById('tabRemovedCnt').textContent = (state.removed_items || []).length;
-
-  // DEEP 카드 서브
-  const deepActive = (state.active_trades||[]).filter(t=>t.type==='deep');
-  document.getElementById('cDeepSub').textContent = `Active: ${deepActive.length}개`;
-
-  // 승률
-  const wr = stats.win_rate || 0;
-  const wrEl = document.getElementById('cWinRate');
-  wrEl.textContent = wr + '%';
-  wrEl.style.color = wr>=50?'var(--green)':wr>=30?'var(--orange)':'var(--red)';
-  document.getElementById('cWinSub').textContent =
-    `TP:${stats.tp||0} SL:${stats.sl||0} TO:${stats.timeout||0}`;
-
-  // DEEP 승률
-  const dwr = stats.deep_win_rate || 0;
-  document.getElementById('cDeepWinRate').textContent = dwr + '%';
-  document.getElementById('cDeepWinSub').textContent =
-    `총 ${stats.deep_total||0}건 | avg ${stats.deep_avg_pnl||0}%`;
-
-  // 평균 PnL
-  const ap = stats.avg_pnl || 0;
-  const apEl = document.getElementById('cAvgPnl');
-  apEl.textContent = (ap>=0?'+':'')+ap.toFixed(2)+'%';
-  apEl.style.color = ap>=0?'var(--green)':'var(--red)';
-  document.getElementById('cPnlSub').textContent =
-    `최고:${stats.best_pnl||0}% 최저:${stats.worst_pnl||0}%`;
-
-  // BTC
-  if (macro.btc_price != null) {
-    const ok = macro.macro_ok;
-    const btcEl = document.getElementById('cBtcWeekly');
-    btcEl.textContent = fmt(macro.btc_weekly_ma20);
-    btcEl.style.color = ok ? 'var(--green)' : 'var(--red)';
-    const ch24 = macro.btc_change_24h;
-    document.getElementById('cBtcInfo').textContent =
-      `24h: ${ch24!=null?(ch24>=0?'+':'')+ch24.toFixed(2)+'%':'-'} | 일봉MA:${fmt(macro.btc_daily_ma20)}`;
+  // BTC MA20
+  const macro = data.macro || {};
+  if (macro.btc_weekly_ma20) {
+    document.getElementById('cardBtcMa').textContent  = Number(macro.btc_weekly_ma20).toLocaleString();
+    const pass = macro.pass;
+    document.getElementById('cardBtcSub').innerHTML   =
+      `현재 ${Number(macro.btc_current||0).toLocaleString()} <span style="color:${pass?'var(--green)':'var(--red)'}">${pass?'✅통과':'❌미통과'}</span>`;
   }
 
-  // 전환율
-  const total    = stats.total     || 0;
-  const activated= stats.activated || 0;
-  document.getElementById('cConvRate').textContent =
-    total ? Math.round(activated/total*100)+'%' : '0%';
-  document.getElementById('cAvgWatch').textContent = `평균Watch: ${stats.avg_watch_hours||0}h`;
-
-  // 승률 바
-  const gs = stats.grade_stats || {};
-  [['DS','DEEP-S'],['DA','DEEP-A'],['S','S'],['A','A'],['B','B']].forEach(([id,g]) => {
-    const gd = gs[g] || {};
-    const wr = gd.win_rate || 0;
-    document.getElementById('bar'+id).style.width = wr+'%';
-    document.getElementById('lbl'+id).textContent = wr+'%';
-    document.getElementById('cnt'+id).textContent = gd.total?`(${gd.tp||0}/${gd.total})`:'';
-  });
-
-  // DEEP 탭 info
-  const btc24 = macro.btc_change_24h;
-  document.getElementById('deepBtcChange').textContent =
-    btc24 != null ? (btc24>=0?'+':'')+btc24.toFixed(2)+'%' : '-';
-  document.getElementById('deepBtcChange').style.color =
-    btc24 != null && btc24 < -2 ? 'var(--red)' : 'var(--muted)';
-  document.getElementById('deepTotalCnt').textContent  = `${stats.deep_total||0}건`;
-  document.getElementById('deepWinRateInfo').textContent = `${stats.deep_win_rate||0}%`;
-  document.getElementById('deepAvgPnl').textContent    = `${stats.deep_avg_pnl||0}%`;
+  // 탭 카운트
+  document.getElementById('tabWatchCnt').textContent  = `(${data.watch_count||0})`;
+  document.getElementById('tabActiveCnt').textContent = `(${data.active_count||0})`;
+  document.getElementById('tabDeepCnt').textContent   = `(${data.deep_count||0})`;
 
   // 테이블
-  renderWatch(normalList);
-  renderDeep(deepList);
-  renderActive(state.active_trades || []);
-  renderNew(state.new_entries       || []);
-  renderRemoved(state.removed_items || []);
-
-  // 타임스탬프
-  document.getElementById('tsLastScan').textContent    = fmtTime(state.last_scan_at);
-  document.getElementById('tsWatchRescan').textContent = fmtTime(state.last_watch_rescan_at);
-  document.getElementById('tsPrice').textContent       = fmtTime(state.last_price_check_at);
-  document.getElementById('tsActive').textContent      = fmtTime(state.last_active_check_at);
-  document.getElementById('tsScanCnt').textContent     = state.scan_count || 0;
-  updateCountdown(state.next_scan_at);
+  renderWatch(data.watch_list);
+  renderActive(data.active_trades);
+  renderDeep(data.active_trades);
+  renderNew(data.new_entries);
+  renderGradeBars(stats.grade_stats);
+  renderDeepPanel(data.active_trades);
 }
 
-// ── 테이블 렌더 ───────────────────────────────────────────────
-function renderWatch(list) {
-  const tbody = document.getElementById('watchTbody');
-  if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="17" style="text-align:center;color:var(--muted);padding:20px">Watch 종목 없음</td></tr>';
-    return;
-  }
-  const sorted = [...list].sort((a,b) => (b.current?.score||0)-(a.current?.score||0));
-  tbody.innerHTML = sorted.map(w => {
-    const snap = w.snapshot || {};
-    const cur  = w.current  || {};
-    const es   = cur.entry_strength || {};
-    const diff = snap.entry_price
-      ? ((cur.price||0)-snap.entry_price)/snap.entry_price*100 : 0;
-    return `<tr>
-      <td><b>${w.ticker.replace('KRW-','')}</b></td>
-      <td>${gradeBadge(w.grade)}</td>
-      <td>${snap.score||0}</td>
-      <td><b>${cur.score||0}</b></td>
-      <td>${scoreChangeBadge(snap.score, cur.score)}</td>
-      <td>${dirCell(cur, w.score_history)}</td>
-      <td>${kCell(cur.daily_k)}</td>
-      <td>${h4KCell(cur.h4_k)}</td>
-      <td>${kCell(cur.h1_k)}</td>
-      <td>${esCell(es)}</td>
-      <td>${fmt(snap.entry_price)}</td>
-      <td>${fmt(cur.price)}</td>
-      <td>${fmtPct(diff)}</td>
-      <td>${fmtTime(snap.registered_at)}</td>
-      <td>${fmtElapsed(snap.registered_at)}</td>
-      <td><span class="badge ${w.manual?'badge-blue':'badge-gray'}">${w.manual?'수동':'자동'}</span></td>
-      <td><button class="btn btn-del" onclick="removeWatch('${w.ticker}')">✕</button></td>
-    </tr>`;
-  }).join('');
-}
-
-function renderDeep(list) {
-  const tbody = document.getElementById('deepTbody');
-  if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="15" style="text-align:center;color:var(--muted);padding:20px">DEEP Watch 종목 없음 (BTC 하락 + K≤5 + 상대강도 조건 충족 시 자동 등록)</td></tr>';
-    return;
-  }
-  tbody.innerHTML = list.map(w => {
-    const snap = w.snapshot || {};
-    const cur  = w.current  || {};
-    const dd   = w.deep_data || {};
-    const bd   = dd.breakdown || {};
-    const diff = snap.entry_price
-      ? ((cur.price||0)-snap.entry_price)/snap.entry_price*100 : 0;
-    const btcCh  = bd.btc_change  != null ? bd.btc_change.toFixed(1)+'%'  : '-';
-    const coinCh = bd.coin_change != null ? bd.coin_change.toFixed(1)+'%' : '-';
-    const rel    = bd.relative    != null ? '+'+bd.relative.toFixed(1)+'%': '-';
-    const volR   = bd.vol_ratio   != null ? bd.vol_ratio.toFixed(2)+'x'   : '-';
-    const wkK    = bd.weekly_k    != null ? bd.weekly_k.toFixed(1)        : '-';
-    return `<tr class="deep-row">
-      <td><b style="color:var(--purple)">${w.ticker.replace('KRW-','')}</b></td>
-      <td>${gradeBadge(w.grade)}</td>
-      <td><span class="deep-score">${dd.score||0}</span></td>
-      <td>${kCell(cur.daily_k)}</td>
-      <td style="color:var(--red)">${btcCh}</td>
-      <td>${coinCh}</td>
-      <td><span class="deep-rel">${rel}</span></td>
-      <td>${bd.bottom_days||1}일</td>
-      <td><span class="deep-vol">${volR}</span></td>
-      <td>${kCell(wkK==='−'?null:parseFloat(wkK))}</td>
-      <td>${fmt(snap.entry_price)}</td>
-      <td>${fmt(cur.price)}</td>
-      <td>${fmtPct(diff)}</td>
-      <td>${fmtTime(snap.registered_at)}</td>
-      <td><button class="btn btn-del" onclick="removeWatch('${w.ticker}')">✕</button></td>
-    </tr>`;
-  }).join('');
-}
-
-function renderActive(list) {
-  const tbody = document.getElementById('activeTbody');
-  if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="13" style="text-align:center;color:var(--muted);padding:20px">Active 종목 없음</td></tr>';
-    return;
-  }
-  tbody.innerHTML = list.map(t => {
-    const es = t.entry_strength || {};
-    return `<tr class="${t.type==='deep'?'deep-row':''}">
-      <td><b>${t.ticker.replace('KRW-','')}</b></td>
-      <td>${typeBadge(t.type)}</td>
-      <td>${gradeBadge(t.grade)}</td>
-      <td>${t.entry_score||0}</td>
-      <td>${t.type==='deep'?'<span style="color:var(--purple)">💎 선진입</span>':esCell(es)}</td>
-      <td>${fmt(t.entry_price)}</td>
-      <td>${fmt(t.current_price)}</td>
-      <td>${fmtPct(t.pnl_pct)}</td>
-      <td style="color:var(--green)">${fmt(t.tp_price)}</td>
-      <td style="color:var(--red)">${fmt(t.sl_price)}</td>
-      <td>${fmtTime(t.activated_at)}</td>
-      <td>${fmtElapsed(t.activated_at)}</td>
-      <td><button class="btn btn-close" onclick="closeTrade('${t.ticker}')">청산</button></td>
-    </tr>`;
-  }).join('');
-}
-
-function renderNew(list) {
-  const tbody = document.getElementById('newTbody');
-  if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:20px">신규 없음</td></tr>';
-    return;
-  }
-  tbody.innerHTML = list.map(w => {
-    const snap = w.snapshot || {};
-    const cur  = w.current  || {};
-    const es   = cur.entry_strength || {};
-    return `<tr>
-      <td><b>${w.ticker.replace('KRW-','')}</b></td>
-      <td>${gradeBadge(w.grade)}</td>
-      <td>${snap.score||0}</td>
-      <td>${dirCell(cur,[])}</td>
-      <td>${kCell(snap.daily_k)}</td>
-      <td>${h4KCell(snap.h4_k)}</td>
-      <td>${kCell(snap.h1_k)}</td>
-      <td>${esCell(es)}</td>
-      <td>${fmtTime(snap.registered_at)}</td>
-    </tr>`;
-  }).join('');
-}
-
-function renderRemoved(list) {
-  const tbody = document.getElementById('removedTbody');
-  if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">만료 없음</td></tr>';
-    return;
-  }
-  tbody.innerHTML = list.map(w => {
-    const snap = w.snapshot || {};
-    const cur  = w.current  || {};
-    const ep   = snap.entry_price || 0;
-    const cp   = cur.price || 0;
-    return `<tr>
-      <td><b>${w.ticker.replace('KRW-','')}</b></td>
-      <td>${gradeBadge(w.grade)}</td>
-      <td>${snap.score||0}</td>
-      <td>${fmt(ep)}</td>
-      <td>${fmt(cp)}</td>
-      <td>${fmtPct(ep?(cp-ep)/ep*100:0)}</td>
-    </tr>`;
-  }).join('');
-}
-
-async function loadHistory() {
-  try {
-    const res  = await fetch('/api/history');
-    const data = await res.json();
-    const list = (data.history||[]).slice().reverse().slice(0,100);
-    const tbody = document.getElementById('historyTbody');
-    if (!list.length) {
-      tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:20px">히스토리 없음</td></tr>';
-      return;
-    }
-    const rMap = {
-      tp:'✅TP', sl:'❌SL', timeout:'⏰TO', manual:'🖐️수동',
-      activated:'🔵Active', expired:'🗑️만료', manual_remove:'🗑️삭제'
-    };
-    tbody.innerHTML = list.map(h => `<tr class="${h.type==='deep'?'deep-row':''}">
-      <td><b>${(h.ticker||'').replace('KRW-','')}</b></td>
-      <td>${typeBadge(h.type||'normal')}</td>
-      <td>${rMap[h.result]||h.result}</td>
-      <td>${gradeBadge(h.grade)}</td>
-      <td>${fmt(h.entry_price)}</td>
-      <td>${fmt(h.close_price)}</td>
-      <td>${h.pnl_pct!=null?fmtPct(h.pnl_pct):'-'}</td>
-      <td>${h.hours_held!=null?h.hours_held.toFixed(1)+'h':'-'}</td>
-      <td>${fmtTime(h.closed_at||h.activated_at)}</td>
-    </tr>`).join('');
-  } catch(e) { console.error(e); }
-}
-
-// ── 카운트다운 ────────────────────────────────────────────────
-let _nextAt = null;
-function updateCountdown(iso) { _nextAt = iso; }
-setInterval(() => {
-  if (!_nextAt) return;
-  const diff = Math.max(0, Math.floor((new Date(_nextAt)-Date.now())/1000));
-  const m = Math.floor(diff/60), s = diff%60;
-  document.getElementById('tsNextScan').textContent =
-    diff>0 ? `${m}분 ${String(s).padStart(2,'0')}초 후` : '스캔 중...';
-}, 1000);
-
-// ── API 액션 ─────────────────────────────────────────────────
-function showMsg(txt, ok=true) {
-  const el = document.getElementById('msg');
-  el.textContent = txt;
-  el.className   = ok?'msg-ok':'msg-err';
-  el.style.display = 'block';
-  setTimeout(()=>{ el.style.display='none'; }, 3000);
-}
-
-async function manualScan() {
-  try {
-    const r = await fetch('/api/scan',{method:'POST'});
-    const d = await r.json();
-    showMsg(d.msg||'스캔 트리거 완료');
-  } catch { showMsg('오류 발생',false); }
-}
-
-async function addWatch() {
-  const ticker = document.getElementById('addInput').value.trim();
-  if (!ticker) return;
-  try {
-    const r = await fetch('/api/watch/add',{
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({ticker})
-    });
-    const d = await r.json();
-    showMsg(d.msg, d.ok);
-    if (d.ok) { document.getElementById('addInput').value=''; poll(); }
-  } catch { showMsg('오류 발생',false); }
-}
-
-async function removeWatch(ticker) {
-  if (!confirm(`${ticker.replace('KRW-','')} 삭제하시겠습니까?`)) return;
-  try {
-    const r = await fetch('/api/watch/remove',{
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({ticker})
-    });
-    const d = await r.json();
-    showMsg(d.msg, d.ok);
-    if (d.ok) poll();
-  } catch { showMsg('오류 발생',false); }
-}
-
-async function closeTrade(ticker) {
-  if (!confirm(`${ticker.replace('KRW-','')} 수동 청산하시겠습니까?`)) return;
-  try {
-    const r = await fetch('/api/trade/close',{
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({ticker})
-    });
-    const d = await r.json();
-    showMsg(d.msg, d.ok);
-    if (d.ok) poll();
-  } catch { showMsg('오류 발생',false); }
-}
-
-async function poll() {
+// ── 폴링 ─────────────────────────────────────────────────
+async function fetchState() {
   try {
     const r = await fetch('/api/state');
     const d = await r.json();
-    updateUI(d);
-  } catch(e) { console.error('poll 오류:',e); }
+    updateState(d);
+  } catch(e) { console.warn('fetchState:', e); }
 }
 
-poll();
-setInterval(poll, 15000);
+async function fetchHistory() {
+  try {
+    const r = await fetch('/api/history');
+    const d = await r.json();
+    renderHistory(d);
+  } catch(e) {}
+}
+
+// ── 액션 ─────────────────────────────────────────────────
+async function triggerScan() {
+  await fetch('/api/scan', { method:'POST' });
+  setTimeout(fetchState, 1000);
+}
+
+async function addWatch() {
+  const val = document.getElementById('addInput').value.trim();
+  if (!val) return;
+  const r = await fetch('/api/watch/add', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ticker: val}),
+  });
+  const d = await r.json();
+  alert(d.message);
+  document.getElementById('addInput').value = '';
+  fetchState();
+}
+
+async function removeWatch(ticker) {
+  if (!confirm(`${ticker} Watch에서 제거?`)) return;
+  const r = await fetch('/api/watch/remove', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ticker}),
+  });
+  const d = await r.json();
+  fetchState();
+}
+
+async function closeTrade(ticker) {
+  if (!confirm(`${ticker} 수동 청산?`)) return;
+  const r = await fetch('/api/active/close', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ticker}),
+  });
+  const d = await r.json();
+  alert(d.message);
+  fetchState();
+  fetchHistory();
+}
+
+// ── 초기 실행 및 폴링 ─────────────────────────────────────
+fetchState();
+fetchHistory();
+setInterval(fetchState, 15000);
+setInterval(fetchHistory, 60000);
 </script>
 </body>
 </html>
 """
 
+
+# ── Flask 라우트 ──────────────────────────────────────────────
 @app.route('/')
 def index():
-    return render_template_string(HTML,
-        tp_pct=scanner.TRADE_TP_PCT,
-        sl_pct=scanner.TRADE_SL_PCT)
+    with scanner._state_lock:
+        version = scanner.scanner_state.get('version', scanner.VERSION)
+    return render_template_string(HTML, version=version)
+
 
 @app.route('/api/state')
 def api_state():
     with scanner._state_lock:
         return jsonify(dict(scanner.scanner_state))
 
-@app.route('/api/config')
-def api_config():
-    return jsonify(mtf_setup.get_module_config())
+
+@app.route('/api/history')
+def api_history():
+    history = scanner.load_trade_history()
+    return jsonify(history)
+
 
 @app.route('/api/scan', methods=['POST'])
 def api_scan():
     scanner.manual_scan()
-    return jsonify({'ok': True, 'msg': '수동 스캔 트리거 완료'})
+    return jsonify({'success': True, 'message': '수동 스캔 요청됨'})
+
 
 @app.route('/api/watch/add', methods=['POST'])
 def api_watch_add():
     data   = request.get_json() or {}
-    ticker = data.get('ticker','').strip()
+    ticker = data.get('ticker', '').strip()
     if not ticker:
-        return jsonify({'ok':False,'msg':'종목명 필요'}), 400
-    return jsonify(scanner.add_manual_watch(ticker))
+        return jsonify({'success': False, 'message': '티커를 입력하세요'})
+    result = scanner.add_manual_watch(ticker)
+    return jsonify(result)
+
 
 @app.route('/api/watch/remove', methods=['POST'])
 def api_watch_remove():
     data   = request.get_json() or {}
-    ticker = data.get('ticker','').strip()
+    ticker = data.get('ticker', '').strip()
     if not ticker:
-        return jsonify({'ok':False,'msg':'종목명 필요'}), 400
-    return jsonify(scanner.remove_watch(ticker))
+        return jsonify({'success': False, 'message': '티커를 입력하세요'})
+    result = scanner.remove_watch(ticker)
+    return jsonify(result)
 
-@app.route('/api/trade/close', methods=['POST'])
-def api_trade_close():
+
+@app.route('/api/active/close', methods=['POST'])
+def api_active_close():
     data   = request.get_json() or {}
-    ticker = data.get('ticker','').strip()
+    ticker = data.get('ticker', '').strip()
     if not ticker:
-        return jsonify({'ok':False,'msg':'종목명 필요'}), 400
-    return jsonify(scanner.manual_close_trade(ticker))
+        return jsonify({'success': False, 'message': '티커를 입력하세요'})
+    result = scanner.manual_close_trade(ticker)
+    return jsonify(result)
 
-@app.route('/api/history')
-def api_history():
-    return jsonify({'history': scanner.load_trade_history()})
 
-@app.route('/health')
-def health():
-    return jsonify({'status':'ok','version':scanner.VERSION})
+@app.route('/api/config')
+def api_config():
+    return jsonify(mtf_setup.get_module_config())
 
-def _start_threads():
-    try:
-        watch_list    = scanner.load_watch_list()
-        active_trades = scanner.load_active_trades()
-        stats         = scanner.calc_stats()
-        with scanner._state_lock:
-            scanner.scanner_state['watch_list']    = watch_list
-            scanner.scanner_state['active_trades'] = active_trades
-            scanner.scanner_state['stats']         = stats
-        log.info(f"초기 로드: Watch {len(watch_list)}개, Active {len(active_trades)}개")
-    except Exception as e:
-        log.warning(f"초기 로드 실패: {e}")
 
-    for target in [
-        scanner.scanner_loop,
-        scanner.watch_rescan_loop,
-        scanner.price_check_loop,
-        scanner.active_monitor_loop,
-        scanner.daily_summary_loop,
-    ]:
-        threading.Thread(target=target, daemon=True).start()
-
-_start_threads()
-
+# ── 실행 ─────────────────────────────────────────────────────
 if __name__ == '__main__':
-    port = int(os.getenv('PORT','8080'))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    import threading
+
+    threads = [
+        threading.Thread(target=scanner.scanner_loop,        daemon=True, name='scanner_loop'),
+        threading.Thread(target=scanner.watch_rescan_loop,   daemon=True, name='watch_rescan'),
+        threading.Thread(target=scanner.price_check_loop,    daemon=True, name='price_check'),
+        threading.Thread(target=scanner.active_monitor_loop, daemon=True, name='active_monitor'),
+        threading.Thread(target=scanner.daily_summary_loop,  daemon=True, name='daily_summary'),
+    ]
+    for t in threads:
+        t.start()
+
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
