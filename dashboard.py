@@ -236,14 +236,19 @@ const GRADE_COLOR = {S:'#ef4444',A:'#f97316',B:'#f59e0b',C:'#94a3b8'};
 const TP  = {{ tp_pct }};
 const SL  = {{ sl_pct }};
 
-function fmt(v,dec=0){ return v==null?'-':Number(v).toLocaleString('ko-KR',{minimumFractionDigits:dec,maximumFractionDigits:dec}); }
-function fmtPct(v){ if(v==null)return'-'; let s=v>=0?'+':''; return `<span style="color:${v>=0?'#22c55e':'#ef4444'}">${s}${Number(v).toFixed(2)}%</span>`; }
-function gradeBadge(g){ return `<span class="badge g-${g}">${g}</span>`; }
-function scoreChange(init,cur){
-  let d=cur-init;
-  if(d>0) return `<span class="score-up">+${d}↑</span>`;
-  if(d<0) return `<span class="score-dn">${d}↓</span>`;
-  return `<span class="score-eq">→</span>`;
+function fmt(v, dec=null){
+  if(v == null) return '-';
+  const n = Number(v);
+  if(dec !== null){
+    return n.toLocaleString('ko-KR', {minimumFractionDigits:dec, maximumFractionDigits:dec});
+  }
+  // 가격 크기에 따라 자동 소수점
+  if(n >= 100)       return n.toLocaleString('ko-KR', {maximumFractionDigits:0});
+  else if(n >= 10)   return n.toLocaleString('ko-KR', {maximumFractionDigits:1});
+  else if(n >= 1)    return n.toLocaleString('ko-KR', {maximumFractionDigits:2});
+  else if(n >= 0.1)  return n.toLocaleString('ko-KR', {maximumFractionDigits:3});
+  else if(n >= 0.01) return n.toLocaleString('ko-KR', {maximumFractionDigits:4});
+  else               return n.toLocaleString('ko-KR', {maximumFractionDigits:6});
 }
 
 async function fetchState(){
