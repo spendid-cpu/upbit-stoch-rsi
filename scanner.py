@@ -20,10 +20,23 @@ import numpy as np
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
-import jwt
-import uuid
-import hashlib
-from urllib.parse import urlencode
+import os
+import json
+import time
+import logging
+import threading
+import numpy as np
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
+
+import mtf_setup as _mtf
+from mtf_setup import (
+    VERSION as MTF_VERSION,
+    analyze_mtf, btc_ma20_signal, calc_relative_strength,
+    PARAMS, _stoch_rsi_k, _sma, _summarize
+)
+
 
 import mtf_setup as _mtf
 from mtf_setup import (
