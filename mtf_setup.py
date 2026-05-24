@@ -1,5 +1,5 @@
 """
-mtf_setup.py  v3.0.5
+mtf_setup.py  v3.0.6
 ─────────────────────────────────────────────
 변경사항:
   v3.0.1  StochRSI K+D 단/중/장기, 점수 기반 등급 통일
@@ -7,14 +7,15 @@ mtf_setup.py  v3.0.5
   v3.0.3  타임프레임 정렬 카운트 기반 등급 강화
           4h K≥70 → timing_warning
           1h K≥80 → overbought_warning
-  v3.0.4  entry_price 보존 로직 (scanner 측 수정)
-  v3.0.5  일봉 단기 K방향(K>D) 점수 반영 (+5 / -5)
-          일봉 중기 K방향(K>D) 점수 반영 (+5 / -5)
-          K방향 정보 summarize 결과에 포함
+  v3.0.4  entry_price 보존 (scanner 측 수정)
+  v3.0.5  일봉 단기/중기 K방향(K>D) 점수 반영 (+5/-5)
+  v3.0.6  일봉 단기 K>15 → -10점 페널티
+          일봉 단기 K>15 + 중기 K>15 → 추가 -5점
+          일봉 중기 K>15 → -5점 페널티
 ─────────────────────────────────────────────
 """
 
-VERSION = 'v3.0.5'
+VERSION = 'v3.0.6'
 
 import numpy as np
 
@@ -88,9 +89,9 @@ def calc_stoch_rsi(closes: list, term: str) -> dict:
     valid  = ~np.isnan(k_arr) & ~np.isnan(d_arr)
     if valid.sum() < 2:
         return _empty_result()
-    idx        = np.where(valid)[0]
-    ci, pi     = idx[-1], idx[-2]
-    k, d       = float(k_arr[ci]), float(d_arr[ci])
+    idx            = np.where(valid)[0]
+    ci, pi         = idx[-1], idx[-2]
+    k, d           = float(k_arr[ci]), float(d_arr[ci])
     prev_k, prev_d = float(k_arr[pi]), float(d_arr[pi])
     gc     = (prev_k <= prev_d) and (k > d)
     dc     = (prev_k >= prev_d) and (k < d)
@@ -131,7 +132,6 @@ def analyze_mtf(daily: list, h4: list, h1: list) -> dict:
 
 def _count_aligned_timeframes(d_long, d_mid, d_short,
                                h4_short, h1_short) -> int:
-    """과매도 or 상승 전환 중인 타임프레임 수 카운트"""
     count = 0
     if d_long.get('zone') == 'oversold':
         count += 1
@@ -168,7 +168,7 @@ def _summarize(mtf: dict) -> dict:
     h4_gc     = h4_short.get('signal') == 'BUY_OK'
     h1_gc     = h1_short.get('signal') == 'BUY_OK'
 
-    # ── K 방향 (K > D 여부) ──────────────────────────
+    # K 방향 (K > D 여부)
     d_short_k_rising = d_short.get('k', 50.0) > d_short.get('d', 50.0)
     d_mid_k_rising   = d_mid.get('k',   50.0) > d_mid.get('d',   50.0)
 
@@ -177,13 +177,13 @@ def _summarize(mtf: dict) -> dict:
     aligned = _count_aligned_timeframes(
                   d_long, d_mid, d_short, h4_short, h1_short)
 
-    # ── 타이밍 경고 ──────────────────────────────────
+    # 타이밍 경고
     h4_k = h4_short.get('k', 50.0)
     h1_k = h1_short.get('k', 50.0)
     timing_warning     = h4_k >= 70
     overbought_warning = h1_k >= 80
 
-    # ── 등급 판정 ─────────────────────────────────────
+    # 등급 판정
     if any_buy_no:
         grade = 'X'
     elif score >= 85 and daily_gc and (h4_gc or h1_gc):
@@ -204,23 +204,22 @@ def _summarize(mtf: dict) -> dict:
                       not overbought_warning)
 
     return {
-        'grade':               grade,
-        'watch_eligible':      watch_eligible,
-        'auto_entry':          auto_entry,
-        'any_buy_no':          any_buy_no,
-        'score':               score,
-        'aligned':             aligned,
-        'd_long_os':           d_long_os,
-        'daily_gc':            daily_gc,
-        'h4_gc':               h4_gc,
-        'h1_gc':               h1_gc,
-        'timing_warning':      timing_warning,
-        'overbought_warning':  overbought_warning,
-        'h4_k':                round(h4_k, 1),
-        'h1_k':                round(h1_k, 1),
-        # v3.0.5 추가
-        'd_short_k_rising':    d_short_k_rising,
-        'd_mid_k_rising':      d_mid_k_rising,
+        'grade':              grade,
+        'watch_eligible':     watch_eligible,
+        'auto_entry':         auto_entry,
+        'any_buy_no':         any_buy_no,
+        'score':              score,
+        'aligned':            aligned,
+        'd_long_os':          d_long_os,
+        'daily_gc':           daily_gc,
+        'h4_gc':              h4_gc,
+        'h1_gc':              h1_gc,
+        'timing_warning':     timing_warning,
+        'overbought_warning': overbought_warning,
+        'h4_k':               round(h4_k, 1),
+        'h1_k':               round(h1_k, 1),
+        'd_short_k_rising':   d_short_k_rising,
+        'd_mid_k_rising':     d_mid_k_rising,
     }
 
 
@@ -229,7 +228,7 @@ def _calc_score(d_long, d_mid, d_short, h4_short, h1_short,
                 d_mid_k_rising:   bool = True) -> int:
     score = 0
 
-    # 일봉 장기 (핵심 – 최대 40점)
+    # ── 일봉 장기 (핵심 – 최대 40점) ─────────────────
     if d_long.get('zone') == 'oversold':
         score += 30
         if (d_long.get('k') or 50) <= 10:
@@ -237,41 +236,54 @@ def _calc_score(d_long, d_mid, d_short, h4_short, h1_short,
     if d_long.get('signal') == 'BUY_OK':
         score += 10
 
-    # 일봉 중기 (최대 20점 → 방향 포함)
+    # ── 일봉 중기 (최대 20점 → 방향 포함) ────────────
+    d_mid_k = d_mid.get('k', 50.0)
     if d_mid.get('zone') == 'oversold':
         score += 10
     if d_mid.get('signal') == 'BUY_OK':
         score += 5
-    # K 방향 보너스/페널티
     if d_mid_k_rising:
-        score += 5   # K > D → 상승 중
+        score += 5
     else:
-        score = max(0, score - 5)  # K < D → 하락 중
+        score = max(0, score - 5)
 
-    # 일봉 단기 (최대 15점 → 방향 포함)
+    # ── 일봉 단기 (최대 15점 → 방향 포함) ────────────
+    d_short_k = d_short.get('k', 50.0)
     if d_short.get('zone') == 'oversold':
         score += 5
     if d_short.get('signal') == 'BUY_OK':
         score += 5
-    # K 방향 보너스/페널티
     if d_short_k_rising:
-        score += 5   # K > D → 상승 중
+        score += 5
     else:
-        score = max(0, score - 5)  # K < D → 하락 중
+        score = max(0, score - 5)
 
-    # 4h (최대 20점)
+    # ── 4h (최대 20점) ────────────────────────────────
     if h4_short.get('signal') == 'BUY_OK':
         score += 20
     elif h4_short.get('zone') == 'oversold':
         score += 8
 
-    # 1h (최대 15점)
+    # ── 1h (최대 15점) ────────────────────────────────
     if h1_short.get('signal') == 'BUY_OK':
         score += 15
     elif h1_short.get('zone') == 'oversold':
         score += 5
 
-    # 페널티
+    # ── v3.0.6 K 위치 페널티 ─────────────────────────
+    # 일봉 단기 K > 15 → 이미 과매도 탈출 시작
+    if d_short_k > 15:
+        score = max(0, score - 10)
+
+    # 일봉 중기 K > 15 → 중기도 올라온 상태
+    if d_mid_k > 15:
+        score = max(0, score - 5)
+
+    # 단기 + 중기 둘 다 K > 15 → 추가 페널티
+    if d_short_k > 15 and d_mid_k > 15:
+        score = max(0, score - 5)
+
+    # ── BUY_NO 페널티 ─────────────────────────────────
     if d_long.get('signal')   == 'BUY_NO': score = max(0, score - 40)
     if h4_short.get('signal') == 'BUY_NO': score = max(0, score - 20)
     if h1_short.get('signal') == 'BUY_NO': score = max(0, score - 10)
@@ -283,8 +295,8 @@ def _calc_score(d_long, d_mid, d_short, h4_short, h1_short,
 
 def btc_ma20_signal(daily_closes: list, weekly_closes: list) -> dict:
     result = {
-        'daily_ma20':   None, 'daily_signal':   'NEUTRAL',
-        'weekly_ma20':  None, 'weekly_signal':  'NEUTRAL',
+        'daily_ma20':   None, 'daily_signal':  'NEUTRAL',
+        'weekly_ma20':  None, 'weekly_signal': 'NEUTRAL',
         'price':        None,
     }
     if daily_closes and len(daily_closes) >= 20:
@@ -325,4 +337,4 @@ def calc_relative_strength(coin_closes: list,
 if __name__ == '__main__':
     print(f'mtf_setup.py {VERSION} 로드 완료 ✅')
     print(f'  등급기준: S(≥85+일봉GC+4h/1hGC) A(≥70+4h/1hGC) B(≥55+aligned≥2)')
-    print(f'  v3.0.5: 일봉 단기/중기 K방향 점수 반영 (+5/-5)')
+    print(f'  v3.0.6: 일봉 단기 K>15 → -10점 | 중기 K>15 → -5점 | 둘다 → 추가-5점')
