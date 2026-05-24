@@ -1,20 +1,20 @@
 """
-mtf_setup.py v3.1.0
+mtf_setup.py v3.1.1
 변경사항:
 - v3.0.1: StochRSI K+D 단기/중기/장기 + 통합 점수 기반 등급
 - v3.0.2: C등급 Watch 등록 차단
 - v3.0.3: 타임프레임 정렬 강화, 등급 강화 (4h K≥70 타이밍경고)
 - v3.0.4: entry_price 보존, price_change = 등록가 대비
-- v3.0.5: 일봉 단기/중기 K 방향 점수 반영 (K>D 방향)
-- v3.0.6: 일봉 단기 K>15 페널티 (-10), K 절대값 위치 반영
-- v3.1.0: 사이클 감지 도입 (BOTTOM/RISING/PEAK/FALLING)
-           K 5개 시점으로 확장, PEAK/FALLING Watch 차단
-           멀티타임프레임 사이클 조합 점수 반영
+- v3.0.5: 일봉 단기/중기 K 방향 점수 반영
+- v3.0.6: 일봉 단기 K>15 페널티
+- v3.1.0: 사이클 감지 (BOTTOM/RISING/PEAK/FALLING), K 5개 시점
+- v3.1.1: cycle_block Watch 완전차단 제거 → 점수 페널티로만 반영
+           PEAK/FALLING은 점수로 자연 필터링, Watch 차단은 BUY_NO+등급만
 """
 
 import numpy as np
 
-VERSION = 'v3.1.0'
+VERSION = 'v3.1.1'
 
 # ── 파라미터 ──────────────────────────────────────────
 PARAMS = {
@@ -77,26 +77,26 @@ def _detect_cycle(k_series):
     k_prev1 = k_series[-2]
     k_prev2 = k_series[-3]
 
-    slope_now  = k_now   - k_prev1   # 최근 기울기
-    slope_prev = k_prev1 - k_prev2   # 이전 기울기
+    slope_now  = k_now   - k_prev1
+    slope_prev = k_prev1 - k_prev2
 
-    # BOTTOM: K가 과매도 구간이고 올라오는 중
+    # BOTTOM: 과매도 구간에서 올라오는 중
     if k_now <= OVERSOLD and slope_now >= 0:
         return 'BOTTOM'
 
-    # FALLING → BOTTOM 진입 직전: K가 과매도지만 아직 내려오는 중
+    # FALLING → BOTTOM 진입 직전
     if k_now <= OVERSOLD and slope_now < 0:
         return 'FALLING'
 
-    # PEAK: 고점에서 막 꺾임 (이전엔 오르다가 지금 내려오기 시작)
+    # PEAK: 고점에서 막 꺾임
     if slope_now < 0 and slope_prev > 0 and k_now > OVERSOLD:
         return 'PEAK'
 
-    # FALLING: 하락 가속 중
+    # FALLING: 하락 가속
     if slope_now < 0 and slope_prev <= 0 and k_now > OVERSOLD:
         return 'FALLING'
 
-    # RISING: 상승 중 (과매도 탈출 후)
+    # RISING: 상승 중
     if slope_now >= 0 and k_now > OVERSOLD:
         return 'RISING'
 
@@ -119,7 +119,6 @@ def calc_stoch_rsi(closes, rsi_period, stoch_period, k_smooth, d_smooth):
     k_arr = _stoch_rsi_k(closes, rsi_period, stoch_period, k_smooth)
     d_arr = _sma(k_arr, d_smooth)
 
-    # 유효한 마지막 인덱스
     valid = ~np.isnan(d_arr)
     if valid.sum() < 6:
         return {
@@ -157,8 +156,8 @@ def calc_stoch_rsi(closes, rsi_period, stoch_period, k_smooth, d_smooth):
     else:
         zone = 'neutral'
 
-    # 시그널
-    if cycle in ('PEAK', 'FALLING') and k_now > OVERSOLD:
+    # 시그널 - PEAK/FALLING이어도 BUY_NO 대신 NEUTRAL로 완화
+    if zone == 'overbought':
         signal = 'BUY_NO'
     elif zone == 'oversold' and cycle == 'BOTTOM':
         signal = 'BUY_OK'
@@ -166,7 +165,8 @@ def calc_stoch_rsi(closes, rsi_period, stoch_period, k_smooth, d_smooth):
         signal = 'BUY_OK'
     elif zone == 'oversold':
         signal = 'WATCH'
-    elif zone == 'overbought':
+    elif cycle in ('PEAK', 'FALLING') and k_now > 40:
+        # 높은 구간에서 꺾이는 경우만 BUY_NO
         signal = 'BUY_NO'
     else:
         signal = 'NEUTRAL'
@@ -199,11 +199,11 @@ def analyze_mtf(daily_closes, h4_closes, h1_closes):
 # ── 타임프레임 정렬 카운트 ────────────────────────────
 def _count_aligned_timeframes(d_long, d_mid, d_short, h4_short, h1_short):
     count = 0
-    if d_long.get('zone')   == 'oversold':                          count += 1
-    if d_mid.get('cycle')   in ('BOTTOM', 'RISING'):                count += 1
-    if d_short.get('cycle') == 'BOTTOM':                            count += 1
-    if h4_short.get('signal') in ('BUY_OK', 'WATCH'):              count += 1
-    if h1_short.get('signal') in ('BUY_OK', 'WATCH'):              count += 1
+    if d_long.get('zone')   == 'oversold':                     count += 1
+    if d_mid.get('cycle')   in ('BOTTOM', 'RISING'):           count += 1
+    if d_short.get('cycle') == 'BOTTOM':                       count += 1
+    if h4_short.get('signal') in ('BUY_OK', 'WATCH'):         count += 1
+    if h1_short.get('signal') in ('BUY_OK', 'WATCH'):         count += 1
     return count
 
 # ── 점수 계산 ─────────────────────────────────────────
@@ -259,7 +259,7 @@ def _calc_score(mtf: dict) -> int:
     # ── 단기+중기 동시 PEAK/FALLING 추가 페널티 ────────
     bad_cycles = {'PEAK', 'FALLING'}
     if short_cycle in bad_cycles and mid_cycle in bad_cycles:
-        score -= 15  # 동시 하락 추가 페널티
+        score -= 15
 
     # ── 4h 단기 ────────────────────────────────────────
     h4_cycle = h4_s.get('cycle', 'RISING')
@@ -295,11 +295,11 @@ def _calc_score(mtf: dict) -> int:
     if h1_s.get('gc'):
         score += 5
 
-    # ── BUY_NO 강한 페널티 ─────────────────────────────
+    # ── BUY_NO 페널티 (overbought만 강하게) ───────────
     for key, data in [('daily_long', d_long), ('daily_mid', d_mid),
                       ('daily_short', d_short), ('h4_short', h4_s), ('h1_short', h1_s)]:
         if data.get('signal') == 'BUY_NO':
-            score -= 20
+            score -= 15
 
     return max(0, min(100, score))
 
@@ -319,25 +319,27 @@ def _summarize(mtf: dict) -> dict:
     h4_gc    = h4_s.get('gc', False)
     h1_gc    = h1_s.get('gc', False)
 
-    # BUY_NO 여부
+    # BUY_NO: overbought만 적용
     any_buy_no = any(
         mtf.get(k, {}).get('signal') == 'BUY_NO'
         for k in ['daily_long', 'daily_mid', 'daily_short', 'h4_short', 'h1_short']
     )
 
-    # 사이클 차단: 단기 또는 중기가 PEAK/FALLING이면 Watch 불가
+    # 사이클 정보 (표시용 - 차단 아님)
     short_cycle = d_short.get('cycle', 'RISING')
     mid_cycle   = d_mid.get('cycle',   'RISING')
-    cycle_block = short_cycle in ('PEAK', 'FALLING') or mid_cycle in ('PEAK', 'FALLING')
+
+    # cycle_block: 정보 표시용만 (Watch 차단 안 함)
+    cycle_block = short_cycle in ('PEAK', 'FALLING') and mid_cycle in ('PEAK', 'FALLING')
 
     # 타이밍 경고
     h4_k = h4_s.get('k', 0.0)
     h1_k = h1_s.get('k', 0.0)
-    timing_warning   = h4_k >= 70
+    timing_warning    = h4_k >= 70
     overbought_warning = h1_k >= 80
 
-    # 등급
-    if any_buy_no or cycle_block:
+    # 등급 - cycle_block은 등급에 영향 없음, 점수로만 반영
+    if any_buy_no:
         grade = 'X'
     elif score >= 85 and daily_gc and (h4_gc or h1_gc):
         grade = 'S'
@@ -399,7 +401,7 @@ def calc_relative_strength(coin_closes, btc_closes, period=20):
     else:           rs_grade = '-'
     return {'rs': round(rs, 2), 'grade': rs_grade}
 
-# ── 진입점 분석 (전체 래퍼) ───────────────────────────
+# ── 전체 래퍼 ─────────────────────────────────────────
 def full_analyze(daily_closes, h4_closes, h1_closes):
     mtf     = analyze_mtf(daily_closes, h4_closes, h1_closes)
     summary = _summarize(mtf)
@@ -408,6 +410,7 @@ def full_analyze(daily_closes, h4_closes, h1_closes):
 # ── 모듈 로드 확인 ────────────────────────────────────
 if __name__ == '__main__' or True:
     print(f'mtf_setup.py {VERSION} 로드 완료 ✅')
-    print(f'  사이클 감지: BOTTOM / RISING / PEAK / FALLING')
-    print(f'  PEAK/FALLING → Watch 자동 차단')
-    print(f'  등급: S(≥85+GC) / A(≥70+GC) / B(≥55+aligned≥2) / X(BUY_NO or cycle_block)')
+    print(f'  사이클 감지: BOTTOM🟢 / RISING🔵 / PEAK🔴 / FALLING⚫')
+    print(f'  cycle_block = 표시용만 (Watch 차단 없음)')
+    print(f'  PEAK/FALLING → 점수 페널티로만 필터링')
+    print(f'  등급: S(≥85+GC) / A(≥70+GC) / B(≥55+aligned≥2) / X(overbought BUY_NO만)')
