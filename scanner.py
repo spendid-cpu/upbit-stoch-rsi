@@ -1,12 +1,9 @@
 """
-scanner.py v3.0.1
+scanner.py v3.0.2
 변경사항:
-- USDT 환율 조회 추가 (BTC 달러 환산)
-- 주봉 MA20 캔들 조회 추가
-- 이벤트 로그 시스템 추가
-- 스캔 상태 플래그 세분화 (scanning / watch_rescanning / price_checking / deep_scanning)
-- 중복 스캔 방지 로직 추가
-- REQUEST_DELAY / MAX_WORKERS 기본값 조정
+- C등급 / X등급 / -등급 Watch 등록 차단
+- 현재가 정보를 watch_item에 포함 (current_price, price_change_pct)
+- 중복 스캔 방지 강화
 """
 
 import os
@@ -20,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import mtf_setup
 
-VERSION = 'v3.0.1'
+VERSION = 'v3.0.2'
 
 # ── 로깅 ──────────────────────────────────────────────────────
 logging.basicConfig(
@@ -54,6 +51,9 @@ BTC_DROP_4H_PCT = float(os.environ.get('BTC_DROP_4H_PCT', '-2.0'))
 
 WATCH_EXPIRE_DAYS = {'S': 7, 'A': 7, 'B': 5, 'C': 3, 'X': 1, '-': 1}
 
+# Watch 등록 허용 등급 (C, X, - 제외)
+WATCH_ALLOW_GRADES = {'S', 'A', 'B'}
+
 STABLE_COINS = {
     'USDT','USDC','DAI','BUSD','TUSD','USDP','USDD',
     'USD1','FDUSD','PYUSD','SUSD','GUSD',
@@ -74,48 +74,39 @@ os.makedirs(BASE_DIR, exist_ok=True)
 # ── 전역 상태 ─────────────────────────────────────────────────
 _state_lock    = threading.Lock()
 _scanner_state = {
-    'version':          VERSION,
-    'mtf_version':      mtf_setup.VERSION,
-
-    # 스캔 상태 플래그
-    'running':            False,   # 전체 스캔 중
-    'watch_rescanning':   False,   # Watch 재스캔 중
-    'price_checking':     False,   # 가격 체크 중
-    'deep_scanning':      False,   # DEEP 스캔 중
-
-    'last_scan':          None,
-    'last_watch_rescan':  None,
-    'last_price_check':   None,
-    'last_deep_scan':     None,
-    'next_scan':          None,
-    'next_deep_scan':     None,
-    'scan_count':         0,
-
-    'watch_count':        0,
-    'active_count':       0,
-    'deep_count':         0,
-
-    # BTC 정보
-    'btc_price':          None,
-    'btc_price_usd':      None,
-    'usdt_rate':          None,
-    'btc_daily_ma20':     None,
-    'btc_daily_ma20_usd': None,
-    'btc_daily_above':    None,
-    'btc_daily_pct':      None,
-    'btc_weekly_ma20':    None,
-    'btc_weekly_ma20_usd':None,
-    'btc_weekly_above':   None,
-    'btc_weekly_pct':     None,
-    'btc_1h_pct':         None,
-    'btc_4h_pct':         None,
-
-    # 통계
-    'total_trades':  0,
-    'win_trades':    0,
-    'total_pnl':     0.0,
-
-    'error': None,
+    'version':             VERSION,
+    'mtf_version':         mtf_setup.VERSION,
+    'running':             False,
+    'watch_rescanning':    False,
+    'price_checking':      False,
+    'deep_scanning':       False,
+    'last_scan':           None,
+    'last_watch_rescan':   None,
+    'last_price_check':    None,
+    'last_deep_scan':      None,
+    'next_scan':           None,
+    'next_deep_scan':      None,
+    'scan_count':          0,
+    'watch_count':         0,
+    'active_count':        0,
+    'deep_count':          0,
+    'btc_price':           None,
+    'btc_price_usd':       None,
+    'usdt_rate':           None,
+    'btc_daily_ma20':      None,
+    'btc_daily_ma20_usd':  None,
+    'btc_daily_above':     None,
+    'btc_daily_pct':       None,
+    'btc_weekly_ma20':     None,
+    'btc_weekly_ma20_usd': None,
+    'btc_weekly_above':    None,
+    'btc_weekly_pct':      None,
+    'btc_1h_pct':          None,
+    'btc_4h_pct':          None,
+    'total_trades':        0,
+    'win_trades':          0,
+    'total_pnl':           0.0,
+    'error':               None,
 }
 
 
@@ -123,7 +114,7 @@ _scanner_state = {
 # JSON I/O
 # ══════════════════════════════════════════════════════════════
 
-def _load_json(path: str, default):
+def _load_json(path, default):
     try:
         if os.path.exists(path):
             with open(path, 'r', encoding='utf-8') as f:
@@ -132,7 +123,7 @@ def _load_json(path: str, default):
         log.warning(f'JSON 로드 실패 {path}: {e}')
     return default
 
-def _save_json(path: str, data):
+def _save_json(path, data):
     try:
         tmp = path + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
@@ -161,12 +152,11 @@ def save_state():
 
 _event_lock = threading.Lock()
 
-def add_event(emoji: str, msg: str):
-    """이벤트 로그 추가 (최대 50개 유지)"""
+def add_event(emoji, msg):
     event = {
-        'time': datetime.now().strftime('%H:%M'),
+        'time':  datetime.now().strftime('%H:%M'),
         'emoji': emoji,
-        'msg': msg,
+        'msg':   msg,
     }
     with _event_lock:
         events = load_events()
@@ -181,7 +171,7 @@ def add_event(emoji: str, msg: str):
 # Upbit API
 # ══════════════════════════════════════════════════════════════
 
-def _upbit_get(url: str, params: dict = None, retries: int = 3):
+def _upbit_get(url, params=None, retries=3):
     for attempt in range(retries):
         try:
             r = requests.get(url, params=params, timeout=10)
@@ -195,22 +185,18 @@ def _upbit_get(url: str, params: dict = None, retries: int = 3):
     return None
 
 
-def get_krw_tickers() -> list:
+def get_krw_tickers():
     data = _upbit_get('https://api.upbit.com/v1/market/all', {'isDetails': 'false'})
     if not data:
         return []
-    tickers = []
-    for item in data:
-        mkt  = item.get('market', '')
-        if not mkt.startswith('KRW-'):
-            continue
-        coin = mkt.replace('KRW-', '')
-        if coin not in STABLE_COINS:
-            tickers.append(mkt)
-    return tickers
+    return [
+        item['market'] for item in data
+        if item.get('market', '').startswith('KRW-')
+        and item['market'].replace('KRW-', '') not in STABLE_COINS
+    ]
 
 
-def get_candles(market: str, unit: str, count: int = CANDLE_COUNT) -> list:
+def get_candles(market, unit, count=CANDLE_COUNT):
     if unit == 'days':
         url = 'https://api.upbit.com/v1/candles/days'
     elif unit == 'weeks':
@@ -223,22 +209,21 @@ def get_candles(market: str, unit: str, count: int = CANDLE_COUNT) -> list:
     return [float(c['trade_price']) for c in reversed(data)]
 
 
-def get_current_price(market: str):
+def get_current_price(market):
     data = _upbit_get('https://api.upbit.com/v1/ticker', {'markets': market})
     if data and len(data) > 0:
         return float(data[0]['trade_price'])
     return None
 
 
-def get_usdt_rate() -> float:
-    """KRW-USDT 시세로 환율 조회 (1 USDT = ? KRW)"""
+def get_usdt_rate():
     data = _upbit_get('https://api.upbit.com/v1/ticker', {'markets': 'KRW-USDT'})
     if data and len(data) > 0:
         return float(data[0]['trade_price'])
-    return 1300.0  # 조회 실패 시 기본값
+    return 1300.0
 
 
-def get_volume_ratio(market: str) -> float:
+def get_volume_ratio(market):
     data = _upbit_get(
         'https://api.upbit.com/v1/candles/days',
         {'market': market, 'count': 21}
@@ -250,29 +235,22 @@ def get_volume_ratio(market: str) -> float:
     return round(vols[-1] / avg_vol, 2) if avg_vol > 0 else 1.0
 
 
-def get_btc_info() -> dict:
-    """BTC 현재가 + 일봉MA20 + 주봉MA20 + 변화율 + USD 환산"""
-    usdt_rate      = get_usdt_rate()
+def get_btc_info():
+    usdt_rate     = get_usdt_rate()
     time.sleep(REQUEST_DELAY)
-
-    closes_daily   = get_candles('KRW-BTC', 'days',  count=30)
+    closes_daily  = get_candles('KRW-BTC', 'days',        count=30)
     time.sleep(REQUEST_DELAY)
-    closes_weekly  = get_candles('KRW-BTC', 'weeks', count=25)
+    closes_weekly = get_candles('KRW-BTC', 'weeks',       count=25)
     time.sleep(REQUEST_DELAY)
-    closes_h4      = get_candles('KRW-BTC', 'minutes/240', count=10)
+    closes_h4     = get_candles('KRW-BTC', 'minutes/240', count=10)
     time.sleep(REQUEST_DELAY)
-    closes_h1      = get_candles('KRW-BTC', 'minutes/60',  count=5)
+    closes_h1     = get_candles('KRW-BTC', 'minutes/60',  count=5)
 
     ma20_info = mtf_setup.btc_ma20_signal(closes_daily, closes_weekly)
+    price     = ma20_info.get('price')
 
-    price = ma20_info.get('price')
-
-    pct_4h = None
-    pct_1h = None
-    if len(closes_h4) >= 2:
-        pct_4h = round((closes_h4[-1] - closes_h4[-2]) / closes_h4[-2] * 100, 2)
-    if len(closes_h1) >= 2:
-        pct_1h = round((closes_h1[-1] - closes_h1[-2]) / closes_h1[-2] * 100, 2)
+    pct_4h = round((closes_h4[-1]-closes_h4[-2])/closes_h4[-2]*100,2) if len(closes_h4)>=2 else None
+    pct_1h = round((closes_h1[-1]-closes_h1[-2])/closes_h1[-2]*100,2) if len(closes_h1)>=2 else None
 
     def to_usd(krw):
         if krw and usdt_rate and usdt_rate > 0:
@@ -296,20 +274,20 @@ def get_btc_info() -> dict:
     }
 
 
-def get_price_change_pct(market: str, unit: str, periods: int = 1):
-    candles = get_candles(market, unit, count=periods + 1)
+def get_price_change_pct(market, unit, periods=1):
+    candles = get_candles(market, unit, count=periods+1)
     if len(candles) < 2:
         return None
-    old = candles[-(periods + 1)]
+    old = candles[-(periods+1)]
     new = candles[-1]
-    return round((new - old) / old * 100, 2) if old != 0 else None
+    return round((new-old)/old*100, 2) if old != 0 else None
 
 
 # ══════════════════════════════════════════════════════════════
 # Telegram
 # ══════════════════════════════════════════════════════════════
 
-def send_telegram(msg: str):
+def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
@@ -322,7 +300,7 @@ def send_telegram(msg: str):
         log.warning(f'텔레그램 전송 실패: {e}')
 
 
-def _fmt_watch_msg(item: dict) -> str:
+def _fmt_watch_msg(item):
     return (
         f'📋 <b>Watch 등록</b>\n'
         f'종목: <b>{item["ticker"]}</b> | 등급: <b>{item.get("grade","-")}</b>\n'
@@ -331,7 +309,7 @@ def _fmt_watch_msg(item: dict) -> str:
         f'⏰ {datetime.now().strftime("%m/%d %H:%M")}'
     )
 
-def _fmt_active_msg(item: dict, trade_type: str = 'auto') -> str:
+def _fmt_active_msg(item, trade_type='auto'):
     label = '🤖 자동' if trade_type == 'auto' else '👤 수동'
     return (
         f'✅ <b>Active 진입</b> ({label})\n'
@@ -342,7 +320,7 @@ def _fmt_active_msg(item: dict, trade_type: str = 'auto') -> str:
         f'⏰ {datetime.now().strftime("%m/%d %H:%M")}'
     )
 
-def _fmt_close_msg(item: dict, reason: str, pnl_pct: float) -> str:
+def _fmt_close_msg(item, reason, pnl_pct):
     emoji = '🟢' if pnl_pct >= 0 else '🔴'
     return (
         f'{emoji} <b>종료</b> [{reason}]\n'
@@ -351,7 +329,7 @@ def _fmt_close_msg(item: dict, reason: str, pnl_pct: float) -> str:
         f'⏰ {datetime.now().strftime("%m/%d %H:%M")}'
     )
 
-def _fmt_deep_msg(items: list, btc_pct: str) -> str:
+def _fmt_deep_msg(items, btc_pct):
     lines = [f'🔥 <b>DEEP 상대강도 감지</b> (BTC {btc_pct}%)\n']
     for it in items[:5]:
         lines.append(
@@ -365,7 +343,7 @@ def _fmt_deep_msg(items: list, btc_pct: str) -> str:
 # 코인 분석
 # ══════════════════════════════════════════════════════════════
 
-def analyze_ticker(market: str):
+def analyze_ticker(market):
     try:
         time.sleep(REQUEST_DELAY)
         daily = get_candles(market, 'days',        count=CANDLE_COUNT)
@@ -386,10 +364,22 @@ def analyze_ticker(market: str):
             get_candles(market, 'days', count=30), 'long'
         )
 
+        # 현재가 조회
+        time.sleep(REQUEST_DELAY)
+        current_price = get_current_price(market)
+        reg_price     = daily[-1] if daily else None
+
+        # 등록가 대비 현재가 변화율
+        price_change_pct = None
+        if reg_price and current_price and reg_price > 0:
+            price_change_pct = round((current_price - reg_price) / reg_price * 100, 2)
+
         return {
             'market':   market,
             'ticker':   market.replace('KRW-', ''),
-            'price':    daily[-1] if daily else None,
+            'price':    reg_price,
+            'current_price':    current_price,
+            'price_change_pct': price_change_pct,
 
             'daily_long_k':      mtf['daily']['long'].get('k'),
             'daily_long_d':      mtf['daily']['long'].get('d'),
@@ -425,11 +415,11 @@ def analyze_ticker(market: str):
         return None
 
 
-def _count_bottom_days(closes: list, term: str) -> int:
+def _count_bottom_days(closes, term):
     if len(closes) < 30:
         return 0
     count = 0
-    for i in range(len(closes) - 1, max(len(closes) - 15, -1), -1):
+    for i in range(len(closes)-1, max(len(closes)-15, -1), -1):
         r = mtf_setup.calc_stoch_rsi(closes[:i+1], term)
         if r.get('k') is not None and r['k'] <= 20:
             count += 1
@@ -442,39 +432,45 @@ def _count_bottom_days(closes: list, term: str) -> int:
 # Watch / Active 빌더
 # ══════════════════════════════════════════════════════════════
 
-def _make_watch_item(res: dict) -> dict:
-    now        = datetime.now().isoformat()
-    expire_at  = (
+def _make_watch_item(res):
+    now       = datetime.now().isoformat()
+    expire_at = (
         datetime.now() + timedelta(days=WATCH_EXPIRE_DAYS.get(res.get('grade','-'), 3))
     ).isoformat()
     return {
-        'ticker':        res['ticker'],
-        'market':        res['market'],
-        'grade':         res.get('grade', '-'),
-        'score':         res.get('score', 0),
-        'reg_price':     res.get('price'),
-        'daily_long_k':  res.get('daily_long_k'),
-        'daily_long_d':  res.get('daily_long_d'),
-        'daily_mid_k':   res.get('daily_mid_k'),
-        'daily_mid_d':   res.get('daily_mid_d'),
-        'daily_short_k': res.get('daily_short_k'),
-        'daily_short_d': res.get('daily_short_d'),
-        'h4_short_k':    res.get('h4_short_k'),
-        'h4_short_d':    res.get('h4_short_d'),
-        'h4_gc':         res.get('h4_gc', False),
-        'h1_short_k':    res.get('h1_short_k'),
-        'h1_short_d':    res.get('h1_short_d'),
-        'h1_gc':         res.get('h1_gc', False),
-        'vol_ratio':     res.get('vol_ratio', 1.0),
-        'bottom_days':   res.get('bottom_days', 0),
-        'added_at':      now,
-        'expire_at':     expire_at,
-        'score_history': [res.get('score', 0)],
-        'rescan_count':  0,
+        'ticker':           res['ticker'],
+        'market':           res['market'],
+        'grade':            res.get('grade', '-'),
+        'score':            res.get('score', 0),
+        'reg_price':        res.get('price'),
+        'current_price':    res.get('current_price'),
+        'price_change_pct': res.get('price_change_pct'),
+
+        'daily_long_k':     res.get('daily_long_k'),
+        'daily_long_d':     res.get('daily_long_d'),
+        'daily_mid_k':      res.get('daily_mid_k'),
+        'daily_mid_d':      res.get('daily_mid_d'),
+        'daily_short_k':    res.get('daily_short_k'),
+        'daily_short_d':    res.get('daily_short_d'),
+
+        'h4_short_k':       res.get('h4_short_k'),
+        'h4_short_d':       res.get('h4_short_d'),
+        'h4_gc':            res.get('h4_gc', False),
+
+        'h1_short_k':       res.get('h1_short_k'),
+        'h1_short_d':       res.get('h1_short_d'),
+        'h1_gc':            res.get('h1_gc', False),
+
+        'vol_ratio':        res.get('vol_ratio', 1.0),
+        'bottom_days':      res.get('bottom_days', 0),
+        'added_at':         now,
+        'expire_at':        expire_at,
+        'score_history':    [res.get('score', 0)],
+        'rescan_count':     0,
     }
 
 
-def _make_active_item(watch_item: dict, price: float, trade_type: str = 'auto') -> dict:
+def _make_active_item(watch_item, price, trade_type='auto'):
     now    = datetime.now().isoformat()
     tp     = round(price * (1 + TRADE_TP_PCT / 100), 2)
     sl     = round(price * (1 - TRADE_SL_PCT / 100), 2)
@@ -507,14 +503,14 @@ def _make_active_item(watch_item: dict, price: float, trade_type: str = 'auto') 
     }
 
 
-def _is_watch_expired(item: dict) -> bool:
+def _is_watch_expired(item):
     try:
         return datetime.now() > datetime.fromisoformat(item.get('expire_at', ''))
     except Exception:
         return False
 
 
-def close_active_item(item: dict, reason: str, close_price: float) -> dict:
+def close_active_item(item, reason, close_price):
     entry   = item.get('entry_price', close_price)
     pnl_pct = round((close_price - entry) / entry * 100, 2) if entry > 0 else 0.0
 
@@ -548,15 +544,15 @@ def close_active_item(item: dict, reason: str, close_price: float) -> dict:
 # DEEP 스캐너
 # ══════════════════════════════════════════════════════════════
 
-def run_deep_scan(btc_info: dict):
+def run_deep_scan(btc_info):
     with _state_lock:
         _scanner_state['deep_scanning'] = True
     add_event('🔥', 'DEEP 스캔 시작')
 
     try:
-        tickers  = get_krw_tickers()
-        btc_pct  = min(btc_info.get('pct_1h') or 0, btc_info.get('pct_4h') or 0)
-        results  = []
+        tickers = get_krw_tickers()
+        btc_pct = min(btc_info.get('pct_1h') or 0, btc_info.get('pct_4h') or 0)
+        results = []
 
         def _check(market):
             time.sleep(REQUEST_DELAY)
@@ -586,8 +582,8 @@ def run_deep_scan(btc_info: dict):
             }
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            for res in as_completed({ex.submit(_check, m): m for m in tickers}):
-                r = res.result()
+            for fut in as_completed({ex.submit(_check, m): m for m in tickers}):
+                r = fut.result()
                 if r:
                     results.append(r)
 
@@ -616,7 +612,7 @@ def run_deep_scan(btc_info: dict):
 # 수동 관리 API
 # ══════════════════════════════════════════════════════════════
 
-def manual_add_watch(ticker: str) -> dict:
+def manual_add_watch(ticker):
     ticker  = ticker.upper().replace('KRW-', '')
     market  = f'KRW-{ticker}'
     watches = load_watch_list()
@@ -633,7 +629,7 @@ def manual_add_watch(ticker: str) -> dict:
     return {'success': True, 'message': f'{ticker} Watch 등록 완료', 'item': item}
 
 
-def manual_remove_watch(ticker: str) -> dict:
+def manual_remove_watch(ticker):
     ticker  = ticker.upper().replace('KRW-', '')
     watches = load_watch_list()
     new     = [w for w in watches if w['ticker'] != ticker]
@@ -644,7 +640,7 @@ def manual_remove_watch(ticker: str) -> dict:
     return {'success': True, 'message': f'{ticker} Watch 제거 완료'}
 
 
-def manual_activate_watch(ticker: str) -> dict:
+def manual_activate_watch(ticker):
     ticker  = ticker.upper().replace('KRW-', '')
     watches = load_watch_list()
     actives = load_active_list()
@@ -669,13 +665,14 @@ def manual_activate_watch(ticker: str) -> dict:
     return {'success': True, 'message': f'{ticker} Active 전환 완료', 'item': active}
 
 
-def manual_close_active(ticker: str, reason: str = '수동종료') -> dict:
+def manual_close_active(ticker, reason='수동종료'):
     ticker  = ticker.upper().replace('KRW-', '')
     actives = load_active_list()
     item    = next((a for a in actives if a['ticker'] == ticker), None)
     if not item:
         return {'success': False, 'message': f'{ticker} Active에 없습니다.'}
-    price = get_current_price(f'KRW-{ticker}') or item.get('current_price', item.get('entry_price', 0))
+    price = get_current_price(f'KRW-{ticker}') or \
+            item.get('current_price', item.get('entry_price', 0))
     close_active_item(item, reason, price)
     actives = [a for a in actives if a['ticker'] != ticker]
     save_active_list(actives)
@@ -684,7 +681,7 @@ def manual_close_active(ticker: str, reason: str = '수동종료') -> dict:
     return {'success': True, 'message': f'{ticker} 수동 종료 완료'}
 
 
-def run_single_scan() -> dict:
+def run_single_scan():
     with _state_lock:
         if _scanner_state.get('running'):
             return {'success': False, 'message': '스캔이 이미 실행 중입니다.'}
@@ -695,7 +692,7 @@ def run_single_scan() -> dict:
         return {'success': False, 'message': str(e)}
 
 
-def reset_watch_list() -> dict:
+def reset_watch_list():
     save_watch_list([])
     with _state_lock:
         _scanner_state['watch_count'] = 0
@@ -708,7 +705,6 @@ def reset_watch_list() -> dict:
 # ══════════════════════════════════════════════════════════════
 
 def _run_full_scan():
-    # 중복 실행 방지
     with _state_lock:
         if _scanner_state.get('running'):
             log.info('⏭️ 스캔 이미 실행 중 - 스킵')
@@ -722,22 +718,21 @@ def _run_full_scan():
         tickers = get_krw_tickers()
         log.info(f'  대상: {len(tickers)}개 종목')
 
-        # BTC 정보 갱신
         btc = get_btc_info()
         with _state_lock:
-            _scanner_state['btc_price']           = btc.get('price')
-            _scanner_state['btc_price_usd']       = btc.get('price_usd')
-            _scanner_state['usdt_rate']            = btc.get('usdt_rate')
-            _scanner_state['btc_daily_ma20']       = btc.get('daily_ma20')
-            _scanner_state['btc_daily_ma20_usd']   = btc.get('daily_ma20_usd')
-            _scanner_state['btc_daily_above']      = btc.get('daily_above')
-            _scanner_state['btc_daily_pct']        = btc.get('daily_pct')
-            _scanner_state['btc_weekly_ma20']      = btc.get('weekly_ma20')
-            _scanner_state['btc_weekly_ma20_usd']  = btc.get('weekly_ma20_usd')
-            _scanner_state['btc_weekly_above']     = btc.get('weekly_above')
-            _scanner_state['btc_weekly_pct']       = btc.get('weekly_pct')
-            _scanner_state['btc_1h_pct']           = btc.get('pct_1h')
-            _scanner_state['btc_4h_pct']           = btc.get('pct_4h')
+            _scanner_state['btc_price']            = btc.get('price')
+            _scanner_state['btc_price_usd']        = btc.get('price_usd')
+            _scanner_state['usdt_rate']             = btc.get('usdt_rate')
+            _scanner_state['btc_daily_ma20']        = btc.get('daily_ma20')
+            _scanner_state['btc_daily_ma20_usd']    = btc.get('daily_ma20_usd')
+            _scanner_state['btc_daily_above']       = btc.get('daily_above')
+            _scanner_state['btc_daily_pct']         = btc.get('daily_pct')
+            _scanner_state['btc_weekly_ma20']       = btc.get('weekly_ma20')
+            _scanner_state['btc_weekly_ma20_usd']   = btc.get('weekly_ma20_usd')
+            _scanner_state['btc_weekly_above']      = btc.get('weekly_above')
+            _scanner_state['btc_weekly_pct']        = btc.get('weekly_pct')
+            _scanner_state['btc_1h_pct']            = btc.get('pct_1h')
+            _scanner_state['btc_4h_pct']            = btc.get('pct_4h')
 
         watches        = load_watch_list()
         actives        = load_active_list()
@@ -750,16 +745,21 @@ def _run_full_scan():
             if not res:
                 return
             ticker = res['ticker']
-            if (
-                res.get('watch_eligible') and
-                not res.get('any_buy_no') and
-                ticker not in watch_tickers and
-                ticker not in active_tickers
-            ):
-                item = _make_watch_item(res)
-                new_watches.append(item)
-                add_event('📋', f'{ticker} Watch 등록 [{res["grade"]}] {res["score"]}점')
-                send_telegram(_fmt_watch_msg(item))
+
+            # ── C/X/- 등급 Watch 등록 차단 ──
+            if res.get('grade') not in WATCH_ALLOW_GRADES:
+                return
+            if not res.get('watch_eligible'):
+                return
+            if res.get('any_buy_no'):
+                return
+            if ticker in watch_tickers or ticker in active_tickers:
+                return
+
+            item = _make_watch_item(res)
+            new_watches.append(item)
+            add_event('📋', f'{ticker} Watch 등록 [{res["grade"]}] {res["score"]}점')
+            send_telegram(_fmt_watch_msg(item))
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
             list(ex.map(_process, tickers))
@@ -781,7 +781,7 @@ def _run_full_scan():
             _scanner_state['error']       = None
 
         save_state()
-        add_event('✅', f'스캔 완료 | Watch {len(watches)}개')
+        add_event('✅', f'스캔 완료 | Watch {len(watches)}개 (B등급 이상)')
         log.info(f'✅ 전체 스캔 완료 | Watch: {len(watches)}개')
 
     except Exception as e:
@@ -800,6 +800,7 @@ def _run_watch_rescan():
 
     watches = load_watch_list()
     actives = load_active_list()
+
     if not watches:
         with _state_lock:
             _scanner_state['watch_rescanning'] = False
@@ -830,10 +831,17 @@ def _run_watch_rescan():
                 updated_watches.append(item)
                 continue
 
+            # BUY_NO 감지 시 Watch 제거
             if res.get('any_buy_no'):
                 add_event('❌', f'{ticker} BUY_NO 감지 → Watch 제거')
                 continue
 
+            # 등급 하락으로 C/X/- 되면 Watch 제거
+            if res.get('grade') not in WATCH_ALLOW_GRADES:
+                add_event('📉', f'{ticker} 등급 하락 [{res.get("grade","-")}] → Watch 제거')
+                continue
+
+            # 자동진입 조건 충족
             if res.get('auto_entry'):
                 price = get_current_price(market)
                 if price:
@@ -852,23 +860,25 @@ def _run_watch_rescan():
                     active = _make_active_item(updated_item, price, 'auto')
                     new_actives.append(active)
                     active_tickers.add(ticker)
-                    add_event('✅', f'{ticker} 자동 Active 전환 [{res["grade"]}] @ {price:,.0f}')
+                    add_event('✅', f'{ticker} 자동 Active [{res["grade"]}] @ {price:,.0f}')
                     send_telegram(_fmt_active_msg(active, 'auto'))
                     continue
 
-            # Watch 정보 업데이트
+            # Watch 정보 업데이트 (현재가 포함)
             item_u = {**item}
             item_u.update({
-                'grade':         res['grade'],
-                'score':         res['score'],
-                'h4_short_k':    res.get('h4_short_k'),
-                'h4_short_d':    res.get('h4_short_d'),
-                'h4_gc':         res.get('h4_gc', False),
-                'h1_short_k':    res.get('h1_short_k'),
-                'h1_short_d':    res.get('h1_short_d'),
-                'h1_gc':         res.get('h1_gc', False),
-                'daily_long_k':  res.get('daily_long_k'),
-                'daily_short_k': res.get('daily_short_k'),
+                'grade':            res['grade'],
+                'score':            res['score'],
+                'current_price':    res.get('current_price'),
+                'price_change_pct': res.get('price_change_pct'),
+                'h4_short_k':       res.get('h4_short_k'),
+                'h4_short_d':       res.get('h4_short_d'),
+                'h4_gc':            res.get('h4_gc', False),
+                'h1_short_k':       res.get('h1_short_k'),
+                'h1_short_d':       res.get('h1_short_d'),
+                'h1_gc':            res.get('h1_gc', False),
+                'daily_long_k':     res.get('daily_long_k'),
+                'daily_short_k':    res.get('daily_short_k'),
             })
             sh = item_u.get('score_history', [])
             sh.append(res['score'])
@@ -882,12 +892,11 @@ def _run_watch_rescan():
 
         save_watch_list(updated_watches)
 
-        now = datetime.now().isoformat()
         with _state_lock:
-            _scanner_state['watch_count']        = len(updated_watches)
-            _scanner_state['active_count']       = len(actives)
-            _scanner_state['last_watch_rescan']  = now
-            _scanner_state['watch_rescanning']   = False
+            _scanner_state['watch_count']       = len(updated_watches)
+            _scanner_state['active_count']      = len(actives)
+            _scanner_state['last_watch_rescan'] = datetime.now().isoformat()
+            _scanner_state['watch_rescanning']  = False
 
         add_event('🔍', f'Watch 재스캔 완료 | Watch {len(updated_watches)} / Active {len(actives)}')
 
@@ -909,8 +918,7 @@ def _run_price_check():
 
     remaining = []
     for item in actives:
-        ticker = item['ticker']
-        price  = get_current_price(item['market'])
+        price = get_current_price(item['market'])
         if not price:
             remaining.append(item)
             continue
@@ -939,9 +947,9 @@ def _run_price_check():
 
     save_active_list(remaining)
     with _state_lock:
-        _scanner_state['active_count']    = len(remaining)
-        _scanner_state['last_price_check']= datetime.now().isoformat()
-        _scanner_state['price_checking']  = False
+        _scanner_state['active_count']     = len(remaining)
+        _scanner_state['last_price_check'] = datetime.now().isoformat()
+        _scanner_state['price_checking']   = False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1000,7 +1008,7 @@ def deep_scan_loop():
             p1h = btc_info.get('pct_1h') or 0
             p4h = btc_info.get('pct_4h') or 0
             if p1h <= BTC_DROP_1H_PCT or p4h <= BTC_DROP_4H_PCT:
-                add_event('🔥', f'BTC 급락 감지 (1h:{p1h}% 4h:{p4h}%) → DEEP 스캔')
+                add_event('🔥', f'BTC 급락 (1h:{p1h}% 4h:{p4h}%) → DEEP 스캔')
                 run_deep_scan(btc_info)
             with _state_lock:
                 _scanner_state['next_deep_scan'] = (
@@ -1031,14 +1039,13 @@ def daily_summary_loop():
             wins    = sum(1 for h in today_h if h.get('pnl_pct', 0) > 0)
             pnl_sum = sum(h.get('pnl_pct', 0) for h in today_h)
 
-            msg = (
+            send_telegram(
                 f'📅 <b>일일 요약</b> {today}\n'
                 f'Watch: {len(watches)}개 | Active: {len(actives)}개\n'
                 f'오늘 종료: {len(today_h)}건 | 승: {wins}건\n'
                 f'오늘 수익 합계: {pnl_sum:+.2f}%'
             )
-            send_telegram(msg)
-            add_event('📅', f'일일 요약 발송 | 오늘 {len(today_h)}건 {pnl_sum:+.1f}%')
+            add_event('📅', f'일일 요약 | 오늘 {len(today_h)}건 {pnl_sum:+.1f}%')
 
         except Exception as e:
             log.error(f'daily_summary_loop 오류: {e}')
