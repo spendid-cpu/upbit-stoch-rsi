@@ -1,22 +1,23 @@
 """
-dashboard.py  v3.0.4
+dashboard.py  v3.0.5
 ─────────────────────────────────────────────
 변경사항:
   v3.0.1  BTC KRW/USD, 일봉/주봉 MA20, 이벤트 패널, 상태바
-  v3.0.2  C등급 차단, 등록가/현재가+변동률 컬럼
-  v3.0.3  ⚠️ 타이밍주의 / 🔴 과매수 배지, B등급 강화
+  v3.0.2  C등급 차단, 등록가/현재가+변동률
+  v3.0.3  ⚠️타이밍 / 🔴과매수 배지, B등급 강화
   v3.0.4  등록가 대비 변동률 표시 개선
-          등록가(고정) / 현재가 + 등록가대비% 분리 표시
-          priceCell 가독성 개선
+  v3.0.5  일봉 단기/중기 K/D 컬럼 ↑↓ 방향 표시
+          K>D → 초록 ↑ / K<D → 빨강 ↓
 ─────────────────────────────────────────────
 """
 
-DASHBOARD_VERSION = 'v3.0.4'
+DASHBOARD_VERSION = 'v3.0.5'
 
-import threading
+import threading, logging
 from flask import Flask, jsonify, request, render_template_string
 import scanner as sc
 
+log = logging.getLogger(__name__)
 app = Flask(__name__)
 
 TEMPLATE = """
@@ -37,7 +38,6 @@ TEMPLATE = """
   --red:     #f85149;
   --yellow:  #d29922;
   --blue:    #58a6ff;
-  --purple:  #bc8cff;
   --orange:  #ffa657;
   --s-color: #ffd700;
   --a-color: #58a6ff;
@@ -50,17 +50,15 @@ body {
   font-family: 'Segoe UI', sans-serif; font-size: 13px;
 }
 
-/* ── 헤더 ── */
+/* 헤더 */
 .header {
-  background: var(--card);
-  border-bottom: 1px solid var(--border);
+  background: var(--card); border-bottom: 1px solid var(--border);
   padding: 12px 20px;
   display: flex; align-items: center;
   justify-content: space-between; flex-wrap: wrap; gap: 8px;
 }
 .header-left { display: flex; align-items: center; gap: 12px; }
 .logo { font-size: 18px; font-weight: 700; color: var(--blue); }
-
 .version-badge {
   background: #1f2937; border: 1px solid var(--border);
   border-radius: 12px; padding: 3px 10px;
@@ -72,24 +70,17 @@ body {
   display: none; position: absolute; top: 28px; left: 0;
   background: #1f2937; border: 1px solid var(--border);
   border-radius: 8px; padding: 10px 14px;
-  min-width: 300px; z-index: 100;
+  min-width: 310px; z-index: 100;
   font-size: 11px; line-height: 1.9;
   color: var(--text); white-space: nowrap;
 }
 
-/* ── BTC 블록 ── */
-.btc-block {
-  display: flex; flex-direction: column;
-  gap: 4px; align-items: flex-end;
-}
-.btc-price-row {
-  display: flex; align-items: center; gap: 10px;
-}
+/* BTC 블록 */
+.btc-block { display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
+.btc-price-row { display: flex; align-items: center; gap: 10px; }
 .btc-price { font-size: 16px; font-weight: 700; color: var(--orange); }
 .btc-usd   { font-size: 12px; color: var(--sub); }
-.btc-ma-row {
-  display: flex; gap: 18px; font-size: 11px;
-}
+.btc-ma-row { display: flex; gap: 18px; font-size: 11px; }
 .btc-ma-item { display: flex; align-items: center; gap: 5px; }
 .ma-label { color: var(--sub); }
 .ma-value { color: var(--text); }
@@ -97,21 +88,14 @@ body {
 .ma-below { color: var(--red);   font-weight: 600; }
 .ma-pct   { font-size: 10px; }
 
-/* ── 상태바 ── */
+/* 상태바 */
 .status-bar {
-  background: #0a0e14;
-  border-bottom: 1px solid var(--border);
+  background: #0a0e14; border-bottom: 1px solid var(--border);
   padding: 5px 20px;
   display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
 }
-.si {
-  display: flex; align-items: center; gap: 5px;
-  font-size: 11px; color: var(--sub);
-}
-.dot {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: var(--sub); flex-shrink: 0;
-}
+.si { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--sub); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--sub); flex-shrink: 0; }
 .dot.on  { background: var(--green); animation: blink 1.2s infinite; }
 .dot.off { background: var(--sub); }
 .st.on  { color: var(--green); font-weight: 600; }
@@ -119,13 +103,11 @@ body {
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
 .last-info { margin-left: auto; font-size: 11px; color: var(--sub); }
 
-/* ── 메인 ── */
+/* 메인 */
 .main { padding: 14px 20px; }
 
-/* ── 통계 카드 ── */
-.stats-row {
-  display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap;
-}
+/* 통계 카드 */
+.stats-row { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
 .stat-card {
   background: var(--card); border: 1px solid var(--border);
   border-radius: 10px; padding: 12px 16px;
@@ -135,24 +117,19 @@ body {
 .stat-value { font-size: 22px; font-weight: 700; }
 .stat-sub   { font-size: 10px; color: var(--sub); margin-top: 2px; }
 
-/* ── 탭 ── */
-.tabs {
-  display: flex; gap: 2px; margin-bottom: 10px;
-  border-bottom: 1px solid var(--border);
-}
+/* 탭 */
+.tabs { display: flex; gap: 2px; margin-bottom: 10px; border-bottom: 1px solid var(--border); }
 .tab-btn {
-  background: none; border: none;
-  border-bottom: 2px solid transparent;
-  color: var(--sub); padding: 8px 16px;
-  cursor: pointer; font-size: 13px; font-weight: 500;
-  transition: all .2s;
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--sub); padding: 8px 16px; cursor: pointer;
+  font-size: 13px; font-weight: 500; transition: all .2s;
 }
 .tab-btn:hover  { color: var(--text); }
 .tab-btn.active { color: var(--blue); border-bottom-color: var(--blue); }
 .tab-content { display: none; }
 .tab-content.active { display: block; }
 
-/* ── 테이블 ── */
+/* 테이블 */
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th {
@@ -167,11 +144,8 @@ td {
 }
 tr:hover td { background: #1c2128; }
 
-/* ── 배지 ── */
-.badge {
-  display: inline-block; padding: 2px 7px;
-  border-radius: 10px; font-size: 11px; font-weight: 600;
-}
+/* 배지 */
+.badge { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
 .badge-S { background:#3d2e00; color:var(--s-color); border:1px solid var(--s-color); }
 .badge-A { background:#0d2137; color:var(--a-color); border:1px solid var(--a-color); }
 .badge-B { background:#0d2e15; color:var(--b-color); border:1px solid var(--b-color); }
@@ -186,23 +160,27 @@ tr:hover td { background: #1c2128; }
   vertical-align: middle; margin-left: 4px;
 }
 
-/* ── 가격 셀 ── */
+/* 가격 셀 */
 .pc { line-height: 1.7; }
-.pc-reg  { font-size: 11px; color: var(--sub); }
-.pc-cur  { font-weight: 500; }
-.pc-pct  { font-size: 11px; margin-left: 4px; }
+.pc-reg { font-size: 11px; color: var(--sub); }
+.pc-cur { font-weight: 500; }
+.pc-pct { font-size: 11px; margin-left: 4px; }
 .up   { color: var(--green); }
 .down { color: var(--red); }
 .flat { color: var(--sub); }
 
-/* ── KD 셀 ── */
-.kd  { font-size: 11px; line-height: 1.5; }
+/* KD 셀 */
+.kd  { font-size: 11px; line-height: 1.6; }
 .kos { color: var(--orange); font-weight: 600; }
 .kob { color: var(--red);    font-weight: 600; }
-.kup { color: var(--green); }
-.kdn { color: var(--red); }
+.kup { color: var(--green);  font-weight: 600; }
+.kdn { color: var(--red);    font-weight: 600; }
 
-/* ── 이벤트 패널 ── */
+/* K방향 화살표 */
+.k-rising  { color: var(--green); font-size: 11px; font-weight: 700; }
+.k-falling { color: var(--red);   font-size: 11px; font-weight: 700; }
+
+/* 이벤트 패널 */
 .evt-panel {
   position: fixed; bottom: 20px; right: 20px;
   width: 300px; max-height: 380px;
@@ -216,11 +194,8 @@ tr:hover td { background: #1c2128; }
   display: flex; justify-content: space-between; align-items: center;
   font-size: 12px; font-weight: 600;
 }
-.evt-toggle {
-  background: none; border: none; color: var(--sub);
-  cursor: pointer; font-size: 14px; padding: 0 4px;
-}
-.evt-list { overflow-y: auto; max-height: 320px; padding: 6px 0; }
+.evt-toggle { background: none; border: none; color: var(--sub); cursor: pointer; font-size: 14px; }
+.evt-list   { overflow-y: auto; max-height: 320px; padding: 6px 0; }
 .evt-item {
   padding: 5px 14px; display: flex; gap: 8px;
   border-bottom: 1px solid #21262d; font-size: 11px;
@@ -234,11 +209,8 @@ tr:hover td { background: #1c2128; }
 .evt-item.system { border-left: 3px solid var(--sub); }
 .evt-item.error  { border-left: 3px solid var(--red); }
 
-/* ── 토스트 ── */
-.toast-wrap {
-  position: fixed; top: 60px; right: 20px; z-index: 300;
-  display: flex; flex-direction: column; gap: 8px;
-}
+/* 토스트 */
+.toast-wrap { position: fixed; top: 60px; right: 20px; z-index: 300; display: flex; flex-direction: column; gap: 8px; }
 .toast {
   background: var(--card); border: 1px solid var(--border);
   border-radius: 8px; padding: 10px 16px;
@@ -246,21 +218,14 @@ tr:hover td { background: #1c2128; }
   animation: slideIn .3s ease;
   box-shadow: 0 4px 12px rgba(0,0,0,.4);
 }
-@keyframes slideIn {
-  from { transform: translateX(100%); opacity: 0; }
-  to   { transform: translateX(0);    opacity: 1; }
-}
+@keyframes slideIn { from{transform:translateX(100%);opacity:0} to{transform:translateX(0);opacity:1} }
 
-/* ── 버튼 ── */
-.btn {
-  border: none; border-radius: 6px; padding: 4px 10px;
-  font-size: 11px; cursor: pointer; font-weight: 500;
-}
-.btn-green  { background:#0d2e15; color:var(--green); }
-.btn-red    { background:#2d1010; color:var(--red); }
-.btn:hover  { opacity: .8; }
+/* 버튼 */
+.btn { border: none; border-radius: 6px; padding: 4px 10px; font-size: 11px; cursor: pointer; font-weight: 500; }
+.btn-green { background:#0d2e15; color:var(--green); }
+.btn-red   { background:#2d1010; color:var(--red); }
+.btn:hover    { opacity: .8; }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
-
 .scan-btn {
   background: var(--blue); color: #fff;
   border: none; border-radius: 8px;
@@ -269,14 +234,10 @@ tr:hover td { background: #1c2128; }
 }
 .scan-btn:hover    { background: #4493f8; }
 .scan-btn:disabled { opacity: .5; cursor: not-allowed; }
-
-.empty-msg {
-  text-align: center; color: var(--sub);
-  padding: 40px; font-size: 13px;
-}
+.empty-msg { text-align: center; color: var(--sub); padding: 40px; font-size: 13px; }
 
 @media (max-width: 768px) {
-  .evt-panel { width: 260px; }
+  .evt-panel  { width: 260px; }
   .btc-ma-row { flex-direction: column; gap: 4px; }
 }
 </style>
@@ -291,19 +252,16 @@ tr:hover td { background: #1c2128; }
       {{ dv }}
       <div class="vtip">
         <b>📋 변경사항</b><br>
+        v3.0.5 일봉 단기/중기 K방향 점수 반영 (+5/-5)<br>
+        v3.0.5 K>D → 초록↑ / K&lt;D → 빨강↓ 시각 표시<br>
         v3.0.4 등록가 대비 변동률 표시 (entry_price 고정)<br>
-        v3.0.3 ⚠️타이밍(4hK≥70) / 🔴과매수(1hK≥80) 배지<br>
-        v3.0.3 B등급 강화: score≥55 + aligned≥2<br>
-        v3.0.3 A등급: score≥70 + 4h/1hGC<br>
-        v3.0.3 S등급: score≥85 + 일봉GC + 4h/1hGC<br>
+        v3.0.3 ⚠️타이밍(4hK≥70) / 🔴과매수(1hK≥80)<br>
+        v3.0.3 B등급: score≥55 + aligned≥2<br>
         v3.0.2 C등급 Watch 차단<br>
         v3.0.1 BTC 일봉/주봉 MA20 KRW/USD<br>
-        v3.0.1 실시간 이벤트 패널 + 상태바<br>
       </div>
     </div>
   </div>
-
-  <!-- BTC 블록 -->
   <div class="btc-block">
     <div class="btc-price-row">
       <span class="btc-price" id="btcPrice">–</span>
@@ -329,22 +287,10 @@ tr:hover td { background: #1c2128; }
 
 <!-- 상태바 -->
 <div class="status-bar">
-  <div class="si">
-    <div class="dot" id="d0"></div>
-    <span class="st" id="t0">스캐너 대기</span>
-  </div>
-  <div class="si">
-    <div class="dot" id="d1"></div>
-    <span class="st" id="t1">Watch재스캔 대기</span>
-  </div>
-  <div class="si">
-    <div class="dot" id="d2"></div>
-    <span class="st" id="t2">가격체크 대기</span>
-  </div>
-  <div class="si">
-    <div class="dot" id="d3"></div>
-    <span class="st" id="t3">DEEP 대기</span>
-  </div>
+  <div class="si"><div class="dot" id="d0"></div><span class="st" id="t0">스캐너 대기</span></div>
+  <div class="si"><div class="dot" id="d1"></div><span class="st" id="t1">Watch재스캔 대기</span></div>
+  <div class="si"><div class="dot" id="d2"></div><span class="st" id="t2">가격체크 대기</span></div>
+  <div class="si"><div class="dot" id="d3"></div><span class="st" id="t3">DEEP 대기</span></div>
   <div class="last-info">
     마지막: <span id="lastScan">–</span> |
     다음: <span id="nextScan">–</span> |
@@ -354,8 +300,6 @@ tr:hover td { background: #1c2128; }
 
 <!-- 메인 -->
 <div class="main">
-
-  <!-- 통계 카드 -->
   <div class="stats-row">
     <div class="stat-card">
       <div class="stat-label">📋 Watch</div>
@@ -389,7 +333,6 @@ tr:hover td { background: #1c2128; }
     </div>
   </div>
 
-  <!-- 탭 -->
   <div class="tabs">
     <button class="tab-btn active" onclick="sw('watch',this)">📋 Watch</button>
     <button class="tab-btn"        onclick="sw('active',this)">✅ Active</button>
@@ -397,14 +340,16 @@ tr:hover td { background: #1c2128; }
     <button class="tab-btn"        onclick="sw('history',this)">📊 History</button>
   </div>
 
-  <!-- Watch -->
+  <!-- Watch 탭 -->
   <div id="tab-watch" class="tab-content active">
     <div class="table-wrap">
       <table>
         <thead><tr>
           <th>종목</th><th>등급</th><th>점수</th>
           <th>등록가</th><th>현재가 (등록가대비)</th>
-          <th>일봉 장기 K/D</th><th>일봉 중기 K/D</th><th>일봉 단기 K/D</th>
+          <th>일봉 장기 K/D</th>
+          <th>일봉 중기 K/D ↕</th>
+          <th>일봉 단기 K/D ↕</th>
           <th>4h K/D</th><th>1h K/D</th><th>GC</th>
           <th>거래량</th><th>바닥일수</th><th>등록일</th><th>만료</th><th>관리</th>
         </tr></thead>
@@ -415,7 +360,7 @@ tr:hover td { background: #1c2128; }
     </div>
   </div>
 
-  <!-- Active -->
+  <!-- Active 탭 -->
   <div id="tab-active" class="tab-content">
     <div class="table-wrap">
       <table>
@@ -432,7 +377,7 @@ tr:hover td { background: #1c2128; }
     </div>
   </div>
 
-  <!-- DEEP -->
+  <!-- DEEP 탭 -->
   <div id="tab-deep" class="tab-content">
     <div class="table-wrap">
       <table>
@@ -446,7 +391,7 @@ tr:hover td { background: #1c2128; }
     </div>
   </div>
 
-  <!-- History -->
+  <!-- History 탭 -->
   <div id="tab-history" class="tab-content">
     <div class="table-wrap">
       <table>
@@ -460,265 +405,238 @@ tr:hover td { background: #1c2128; }
       </table>
     </div>
   </div>
-
 </div>
 
 <!-- 이벤트 패널 -->
-<div class="evt-panel" id="evtPanel">
+<div class="evt-panel">
   <div class="evt-hdr">
     <span>📡 실시간 이벤트</span>
     <button class="evt-toggle" onclick="toggleEvt()">▼</button>
   </div>
   <div class="evt-list" id="evtList">
-    <div class="empty-msg" style="padding:20px">이벤트 없음</div>
+    <div class="empty-msg" style="padding:16px">이벤트 없음</div>
   </div>
 </div>
 
-<!-- 토스트 -->
 <div class="toast-wrap" id="toastWrap"></div>
 
 <script>
-// ── 전역 ──────────────────────────────────────────────
 let _evtOpen = true;
 let _cdSec   = 0;
 let _cdTimer = null;
 
-// ── 탭 전환 ──────────────────────────────────────────
 function sw(name, btn) {
   document.querySelectorAll('.tab-content').forEach(e => e.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(e => e.classList.remove('active'));
-  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('tab-'+name).classList.add('active');
   btn.classList.add('active');
 }
-
-// ── 이벤트 패널 토글 ─────────────────────────────────
 function toggleEvt() {
-  const list = document.getElementById('evtList');
-  const btn  = document.querySelector('.evt-toggle');
+  const l = document.getElementById('evtList');
+  const b = document.querySelector('.evt-toggle');
   _evtOpen = !_evtOpen;
-  list.style.display = _evtOpen ? 'block' : 'none';
-  btn.textContent    = _evtOpen ? '▼' : '▲';
+  l.style.display = _evtOpen ? 'block' : 'none';
+  b.textContent   = _evtOpen ? '▼' : '▲';
 }
-
-// ── 토스트 ───────────────────────────────────────────
-function toast(msg, ms = 3500) {
+function toast(msg, ms=3500) {
   const c = document.getElementById('toastWrap');
   const t = document.createElement('div');
-  t.className   = 'toast';
-  t.textContent = msg;
-  c.appendChild(t);
-  setTimeout(() => t.remove(), ms);
+  t.className = 'toast'; t.textContent = msg;
+  c.appendChild(t); setTimeout(()=>t.remove(), ms);
 }
 
-// ── 숫자 포맷 ─────────────────────────────────────────
+// 숫자 포맷
 function fp(p) {
   if (p == null) return '–';
-  if (p >= 100000) return Number(p).toLocaleString('ko-KR', {maximumFractionDigits:0});
+  if (p >= 100000) return Number(p).toLocaleString('ko-KR',{maximumFractionDigits:0});
   if (p >= 1)      return Number(p).toFixed(2);
   if (p >= 0.01)   return Number(p).toFixed(4);
   return Number(p).toFixed(6);
 }
 function fusd(krw, rate) {
-  if (!krw || !rate) return '';
-  return '($' + (krw / rate).toLocaleString('en-US', {maximumFractionDigits:0}) + ')';
+  if (!krw||!rate) return '';
+  return '($'+Number(krw/rate).toLocaleString('en-US',{maximumFractionDigits:0})+')';
 }
 function fPct(v) {
-  if (v == null) return '–';
-  return (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%';
+  if (v==null) return '–';
+  return (v>=0?'+':'')+Number(v).toFixed(2)+'%';
 }
 
-// ── 등급 배지 ─────────────────────────────────────────
+// 배지
 function gb(g) {
-  if (!g || g === '-') return '<span style="color:var(--sub)">–</span>';
-  const m = {S:'badge-S', A:'badge-A', B:'badge-B', X:'badge-X'};
+  if (!g||g==='-') return '<span style="color:var(--sub)">–</span>';
+  const m={S:'badge-S',A:'badge-A',B:'badge-B',X:'badge-X'};
   return `<span class="badge ${m[g]||'badge-B'}">${g}</span>`;
 }
-
-// ── 점수바 ────────────────────────────────────────────
 function sb(score, grade) {
-  const c = {S:'var(--s-color)',A:'var(--a-color)',B:'var(--b-color)',X:'var(--x-color)'};
-  const col = c[grade] || 'var(--sub)';
-  const w   = Math.min(score, 100) * 0.5;
+  const c={S:'var(--s-color)',A:'var(--a-color)',B:'var(--b-color)',X:'var(--x-color)'};
+  const col=c[grade]||'var(--sub)';
   return `<span style="color:${col};font-weight:600">${score}</span>`
-       + `<span class="score-bar" style="width:${w}px;background:${col}"></span>`;
+       + `<span class="score-bar" style="width:${Math.min(score,100)*.5}px;background:${col}"></span>`;
 }
 
-// ── KD 셀 ─────────────────────────────────────────────
-function kd(k, d, sig) {
+// ── KD 셀 (방향 표시 포함) ───────────────────────────
+function kdCell(k, d, sig, showDirection=false) {
   const kc  = k <= 20 ? 'kos' : (k >= 80 ? 'kob' : '');
-  const dir = sig === 'BUY_OK' ? '↑' : (sig === 'BUY_NO' ? '↓' : '');
-  const dc  = sig === 'BUY_OK' ? 'kup' : (sig === 'BUY_NO' ? 'kdn' : '');
+  // GC/DC 화살표
+  const dir = sig==='BUY_OK' ? '↑' : (sig==='BUY_NO' ? '↓' : '');
+  const dc  = sig==='BUY_OK' ? 'kup' : (sig==='BUY_NO' ? 'kdn' : '');
+  // K방향 화살표 (K>D 여부)
+  let dirArrow = '';
+  if (showDirection && k != null && d != null) {
+    if (k > d) {
+      dirArrow = '<span class="k-rising"> ↑</span>';
+    } else if (k < d) {
+      dirArrow = '<span class="k-falling"> ↓</span>';
+    } else {
+      dirArrow = '<span style="color:var(--sub)"> –</span>';
+    }
+  }
   return `<div class="kd">
-    <span class="${kc}">${k != null ? k.toFixed(1) : '–'}</span>
-    <span style="color:var(--sub)">/${d != null ? d.toFixed(1) : '–'}</span>
-    <span class="${dc}">${dir}</span>
+    <span class="${kc}">${k!=null?k.toFixed(1):'–'}</span>
+    <span style="color:var(--sub)">/${d!=null?d.toFixed(1):'–'}</span>
+    <span class="${dc}">${dir}</span>${dirArrow}
   </div>`;
 }
 
-// ── GC 배지 ───────────────────────────────────────────
 function gcb(item) {
-  const p = [];
+  const p=[];
   if (item.daily_gc) p.push('<span class="badge badge-gc">일봉✨</span>');
   if (item.h4_gc)    p.push('<span class="badge badge-gc">4h✨</span>');
   if (item.h1_gc)    p.push('<span class="badge badge-gc">1h✨</span>');
-  return p.join(' ') || '<span style="color:var(--sub)">–</span>';
+  return p.join(' ')||'<span style="color:var(--sub)">–</span>';
 }
-
-// ── 경고 배지 ─────────────────────────────────────────
 function wb(item) {
-  if (item.overbought_warning)
-    return '<span class="badge badge-over">🔴과매수</span>';
-  if (item.timing_warning)
-    return '<span class="badge badge-warn">⚠️타이밍</span>';
+  if (item.overbought_warning) return '<span class="badge badge-over">🔴과매수</span>';
+  if (item.timing_warning)     return '<span class="badge badge-warn">⚠️타이밍</span>';
   return '';
 }
-
-// ── 거래량 배지 ───────────────────────────────────────
 function vb(v) {
-  if (v == null) return '–';
-  const ico = v >= 2 ? '🔥' : (v >= 1 ? '📈' : '');
+  if (v==null) return '–';
+  const ico = v>=2?'🔥':(v>=1?'📈':'');
   return `<span class="badge badge-vol">${ico}${v.toFixed(1)}x</span>`;
 }
 
-// ── 등록가 셀 ─────────────────────────────────────────
-function regCell(entryPrice) {
-  return `<div style="color:var(--sub);font-size:12px">${fp(entryPrice)}</div>`;
+// 가격 셀
+function regCell(p) {
+  return `<div style="color:var(--sub);font-size:12px">${fp(p)}</div>`;
 }
-
-// ── 현재가 + 등록가 대비 변동률 셀 ───────────────────
-function curCell(currentPrice, pricePct) {
-  if (!currentPrice) return '–';
-  const pct    = pricePct != null ? pricePct : 0;
-  const pClass = pct > 0.05 ? 'up' : (pct < -0.05 ? 'down' : 'flat');
-  const arrow  = pct > 0.05 ? '▲' : (pct < -0.05 ? '▼' : '');
-  const sign   = pct >= 0 ? '+' : '';
+function curCell(cur, pct) {
+  if (!cur) return '–';
+  pct = pct||0;
+  const pc = pct>0.05?'up':(pct<-0.05?'down':'flat');
+  const ar = pct>0.05?'▲':(pct<-0.05?'▼':'');
+  const sg = pct>=0?'+':'';
   return `<div class="pc">
-    <span class="pc-cur">${fp(currentPrice)}</span>
-    <span class="pc-pct ${pClass}">${arrow}${sign}${pct.toFixed(2)}%</span>
+    <span class="pc-cur">${fp(cur)}</span>
+    <span class="pc-pct ${pc}">${ar}${sg}${pct.toFixed(2)}%</span>
   </div>`;
 }
 
-// ── BTC 헤더 업데이트 ─────────────────────────────────
+// BTC
 function updateBtc(s) {
-  const rate = s.usdt_rate || 1350;
+  const rate = s.usdt_rate||1350;
   if (s.btc_price) {
     document.getElementById('btcPrice').textContent =
-      '₩' + Number(s.btc_price).toLocaleString('ko-KR');
-    document.getElementById('btcUsd').textContent =
-      fusd(s.btc_price, rate);
+      '₩'+Number(s.btc_price).toLocaleString('ko-KR');
+    document.getElementById('btcUsd').textContent = fusd(s.btc_price,rate);
   }
-  function setMa(valId, sigId, pctId, maVal, sig, price) {
-    if (!maVal) return;
-    document.getElementById(valId).textContent =
-      '₩' + Number(maVal).toLocaleString('ko-KR') + ' ' + fusd(maVal, rate);
-    const el = document.getElementById(sigId);
-    const isA = sig === 'ABOVE';
-    el.className   = isA ? 'ma-above' : 'ma-below';
-    el.textContent = isA ? '▲' : '▼';
+  function setMa(vi,si,pi,ma,sig,price) {
+    if (!ma) return;
+    document.getElementById(vi).textContent =
+      '₩'+Number(ma).toLocaleString('ko-KR')+' '+fusd(ma,rate);
+    const el=document.getElementById(si);
+    const ia=sig==='ABOVE';
+    el.className=ia?'ma-above':'ma-below';
+    el.textContent=ia?'▲':'▼';
     if (price) {
-      const pct = ((price - maVal) / maVal * 100).toFixed(2);
-      const pe  = document.getElementById(pctId);
-      pe.textContent = (pct >= 0 ? '+' : '') + pct + '%';
-      pe.style.color = pct >= 0 ? 'var(--green)' : 'var(--red)';
+      const pct=((price-ma)/ma*100).toFixed(2);
+      const pe=document.getElementById(pi);
+      pe.textContent=(pct>=0?'+':'')+pct+'%';
+      pe.style.color=pct>=0?'var(--green)':'var(--red)';
     }
   }
-  setMa('dMaVal','dMaSig','dMaPct',
-        s.btc_daily_ma20,  s.btc_daily_signal,  s.btc_price);
-  setMa('wMaVal','wMaSig','wMaPct',
-        s.btc_weekly_ma20, s.btc_weekly_signal, s.btc_price);
+  setMa('dMaVal','dMaSig','dMaPct',s.btc_daily_ma20, s.btc_daily_signal, s.btc_price);
+  setMa('wMaVal','wMaSig','wMaPct',s.btc_weekly_ma20,s.btc_weekly_signal,s.btc_price);
 }
 
-// ── 상태바 업데이트 ───────────────────────────────────
+// 상태바
 function updateStatus(s) {
-  function set(di, ti, on, label) {
-    const d = document.getElementById(di);
-    const t = document.getElementById(ti);
-    d.className = 'dot ' + (on ? 'on' : 'off');
-    t.className = 'st '  + (on ? 'on' : 'off');
-    t.textContent = label;
+  function set(di,ti,on,label) {
+    document.getElementById(di).className='dot '+(on?'on':'off');
+    const t=document.getElementById(ti);
+    t.className='st '+(on?'on':'off');
+    t.textContent=label;
   }
-  set('d0','t0', s.running,
-      s.running          ? '⏳ 전체 스캐닝 중...'  : '✅ 스캐너 대기');
-  set('d1','t1', s.watch_rescanning,
-      s.watch_rescanning ? '⏳ Watch 재스캔 중...' : 'Watch 재스캔 대기');
-  set('d2','t2', s.price_checking,
-      s.price_checking   ? '⏳ 가격 체크 중...'    : '가격 체크 대기');
-  set('d3','t3', s.deep_scanning,
-      s.deep_scanning    ? '🔥 DEEP 스캔 중...'    : 'DEEP 대기');
-
-  document.getElementById('lastScan').textContent = s.last_scan || '–';
-  document.getElementById('nextScan').textContent = s.next_scan || '–';
+  set('d0','t0',s.running,           s.running?'⏳ 전체 스캐닝 중...':'✅ 스캐너 대기');
+  set('d1','t1',s.watch_rescanning,  s.watch_rescanning?'⏳ Watch 재스캔 중...':'Watch 재스캔 대기');
+  set('d2','t2',s.price_checking,    s.price_checking?'⏳ 가격 체크 중...':'가격 체크 대기');
+  set('d3','t3',s.deep_scanning,     s.deep_scanning?'🔥 DEEP 스캔 중...':'DEEP 대기');
+  document.getElementById('lastScan').textContent=s.last_scan||'–';
+  document.getElementById('nextScan').textContent=s.next_scan||'–';
   if (s.next_scan) {
-    const diff = Math.max(0,
-      Math.floor((new Date(s.next_scan.replace(' ','T')) - new Date()) / 1000));
+    const diff=Math.max(0,Math.floor(
+      (new Date(s.next_scan.replace(' ','T'))-new Date())/1000));
     startCd(diff);
   }
 }
 
-// ── 카운트다운 ────────────────────────────────────────
 function startCd(sec) {
   if (_cdTimer) clearInterval(_cdTimer);
-  _cdSec = sec;
+  _cdSec=sec;
   function tick() {
-    const el = document.getElementById('countdown');
+    const el=document.getElementById('countdown');
     if (!el) return;
-    if (_cdSec <= 0) { el.textContent = '⏳ 스캔 예정'; return; }
-    const m = Math.floor(_cdSec / 60);
-    const s = _cdSec % 60;
-    el.textContent = `다음 ${m}분 ${String(s).padStart(2,'0')}초`;
+    if (_cdSec<=0){el.textContent='⏳ 스캔 예정';return;}
+    const m=Math.floor(_cdSec/60), s=_cdSec%60;
+    el.textContent=`다음 ${m}분 ${String(s).padStart(2,'0')}초`;
     _cdSec--;
   }
-  tick();
-  _cdTimer = setInterval(tick, 1000);
+  tick(); _cdTimer=setInterval(tick,1000);
 }
 
-// ── 통계 카드 ─────────────────────────────────────────
 function updateStats(d) {
-  const s = d.state || {};
-  document.getElementById('sWatch').textContent  = d.watch?.length  ?? 0;
-  document.getElementById('sActive').textContent = d.active?.length ?? 0;
-  document.getElementById('sDeep').textContent   = d.deep?.length   ?? 0;
-  document.getElementById('sScan').textContent   = s.scan_count     ?? 0;
-
-  const sub = document.getElementById('sScanSub');
-  sub.textContent = s.running ? '⏳ 스캔 중...' : '총 스캔 횟수';
-  sub.style.color = s.running ? 'var(--yellow)' : 'var(--sub)';
-
-  const total = s.total_trades || 0;
-  const wins  = s.win_trades   || 0;
-  const wr    = total > 0 ? Math.round(wins / total * 100) : 0;
-  document.getElementById('sWin').textContent    = total > 0 ? wr + '%' : '–';
+  const s=d.state||{};
+  document.getElementById('sWatch').textContent  = d.watch?.length??0;
+  document.getElementById('sActive').textContent = d.active?.length??0;
+  document.getElementById('sDeep').textContent   = d.deep?.length??0;
+  document.getElementById('sScan').textContent   = s.scan_count??0;
+  const sub=document.getElementById('sScanSub');
+  sub.textContent=s.running?'⏳ 스캔 중...':'총 스캔 횟수';
+  sub.style.color=s.running?'var(--yellow)':'var(--sub)';
+  const total=s.total_trades||0, wins=s.win_trades||0;
+  const wr=total>0?Math.round(wins/total*100):0;
+  document.getElementById('sWin').textContent    = total>0?wr+'%':'–';
   document.getElementById('sWinSub').textContent = `${wins}/${total}건`;
-
-  const pnl   = s.total_pnl || 0;
-  const pnlEl = document.getElementById('sPnl');
-  pnlEl.textContent = total > 0 ? (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : '–';
-  pnlEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+  const pnl=s.total_pnl||0;
+  const pe=document.getElementById('sPnl');
+  pe.textContent=total>0?(pnl>=0?'+':'')+pnl.toFixed(2)+'%':'–';
+  pe.style.color=pnl>=0?'var(--green)':'var(--red)';
 }
 
 // ── Watch 테이블 ──────────────────────────────────────
 function renderWatch(watch) {
-  const tb = document.getElementById('watchBody');
-  if (!watch || !watch.length) {
-    tb.innerHTML = '<tr><td colspan="16" class="empty-msg">Watch 종목 없음 (B등급 이상)</td></tr>';
+  const tb=document.getElementById('watchBody');
+  if (!watch||!watch.length) {
+    tb.innerHTML='<tr><td colspan="16" class="empty-msg">Watch 종목 없음 (B등급 이상)</td></tr>';
     return;
   }
-  const sorted = [...watch].sort((a,b) => (b.score||0) - (a.score||0));
-  tb.innerHTML = sorted.map(w => {
-    const sym   = w.market.replace('KRW-','');
-    const warn  = wb(w);
-    const dLSig = w.d_long_k <= 20 ? 'BUY_OK' : 'NEUTRAL';
+  const sorted=[...watch].sort((a,b)=>(b.score||0)-(a.score||0));
+  tb.innerHTML=sorted.map(w=>{
+    const sym=w.market.replace('KRW-','');
+    const warn=wb(w);
+    const dLSig=w.d_long_k<=20?'BUY_OK':'NEUTRAL';
     return `<tr>
-      <td><b>${sym}</b>${warn ? '<br>'+warn : ''}</td>
+      <td><b>${sym}</b>${warn?'<br>'+warn:''}</td>
       <td>${gb(w.grade)}</td>
-      <td>${sb(w.score||0, w.grade)}</td>
+      <td>${sb(w.score||0,w.grade)}</td>
       <td>${regCell(w.entry_price)}</td>
-      <td>${curCell(w.current_price, w.price_change)}</td>
-      <td>${kd(w.d_long_k,  w.d_long_d,  dLSig)}</td>
-      <td>${kd(w.d_mid_k,   w.d_mid_d,   'NEUTRAL')}</td>
-      <td>${kd(w.d_short_k, w.d_short_d, 'NEUTRAL')}</td>
-      <td>${kd(w.h4_k_val,  w.h4_d_val,  w.h4_gc ? 'BUY_OK' : 'NEUTRAL')}</td>
-      <td>${kd(w.h1_k_val,  w.h1_d_val,  w.h1_gc ? 'BUY_OK' : 'NEUTRAL')}</td>
+      <td>${curCell(w.current_price,w.price_change)}</td>
+      <td>${kdCell(w.d_long_k,  w.d_long_d,  dLSig,        false)}</td>
+      <td>${kdCell(w.d_mid_k,   w.d_mid_d,   'NEUTRAL',    true)}</td>
+      <td>${kdCell(w.d_short_k, w.d_short_d, 'NEUTRAL',    true)}</td>
+      <td>${kdCell(w.h4_k_val,  w.h4_d_val,  w.h4_gc?'BUY_OK':'NEUTRAL', false)}</td>
+      <td>${kdCell(w.h1_k_val,  w.h1_d_val,  w.h1_gc?'BUY_OK':'NEUTRAL', false)}</td>
       <td>${gcb(w)}</td>
       <td>${vb(w.volume_ratio)}</td>
       <td>${w.bottom_days??0}일</td>
@@ -732,25 +650,24 @@ function renderWatch(watch) {
   }).join('');
 }
 
-// ── Active 테이블 ─────────────────────────────────────
+// Active
 function renderActive(active) {
-  const tb = document.getElementById('activeBody');
-  if (!active || !active.length) {
-    tb.innerHTML = '<tr><td colspan="11" class="empty-msg">진입 종목 없음</td></tr>';
+  const tb=document.getElementById('activeBody');
+  if (!active||!active.length) {
+    tb.innerHTML='<tr><td colspan="11" class="empty-msg">진입 종목 없음</td></tr>';
     return;
   }
-  tb.innerHTML = active.map(a => {
-    const sym = a.market.replace('KRW-','');
-    const cur = a.current_price || a.entry_price;
-    const pnl = (cur - a.entry_price) / a.entry_price * 100;
-    const pc  = pnl >= 0 ? 'up' : 'down';
+  tb.innerHTML=active.map(a=>{
+    const sym=a.market.replace('KRW-','');
+    const cur=a.current_price||a.entry_price;
+    const pnl=(cur-a.entry_price)/a.entry_price*100;
     return `<tr>
       <td><b>${sym}</b></td>
       <td>${gb(a.grade)}</td>
-      <td>${sb(a.score||0, a.grade)}</td>
+      <td>${sb(a.score||0,a.grade)}</td>
       <td>${regCell(a.entry_price)}</td>
-      <td>${curCell(cur, pnl)}</td>
-      <td class="${pc}" style="font-weight:600">${fPct(pnl)}</td>
+      <td>${curCell(cur,pnl)}</td>
+      <td class="${pnl>=0?'up':'down'}" style="font-weight:600">${fPct(pnl)}</td>
       <td style="color:var(--green)">+${a.tp_pct}% (${fp(a.tp_price)})</td>
       <td style="color:var(--red)">-${a.sl_pct}% (${fp(a.sl_price)})</td>
       <td>${vb(a.volume_ratio)}</td>
@@ -760,16 +677,16 @@ function renderActive(active) {
   }).join('');
 }
 
-// ── DEEP 테이블 ───────────────────────────────────────
+// DEEP
 function renderDeep(deep) {
-  const tb = document.getElementById('deepBody');
-  if (!deep || !deep.length) {
-    tb.innerHTML = '<tr><td colspan="5" class="empty-msg">BTC 급락(-1% 이상) 시 자동 스캔</td></tr>';
+  const tb=document.getElementById('deepBody');
+  if (!deep||!deep.length) {
+    tb.innerHTML='<tr><td colspan="5" class="empty-msg">BTC 급락(-1% 이상) 시 자동 스캔</td></tr>';
     return;
   }
-  tb.innerHTML = deep.map(d => {
-    const sym = d.market.replace('KRW-','');
-    const c   = d.rs >= 2 ? 'var(--green)' : (d.rs >= 0 ? 'var(--yellow)' : 'var(--red)');
+  tb.innerHTML=deep.map(d=>{
+    const sym=d.market.replace('KRW-','');
+    const c=d.rs>=2?'var(--green)':(d.rs>=0?'var(--yellow)':'var(--red)');
     return `<tr>
       <td><b>${sym}</b></td>
       <td style="color:${c};font-weight:600">${d.rs>=0?'+':''}${d.rs}%</td>
@@ -780,25 +697,23 @@ function renderDeep(deep) {
   }).join('');
 }
 
-// ── History 테이블 ────────────────────────────────────
+// History
 function renderHistory(history) {
-  const tb = document.getElementById('historyBody');
-  if (!history || !history.length) {
-    tb.innerHTML = '<tr><td colspan="8" class="empty-msg">종료된 트레이드 없음</td></tr>';
+  const tb=document.getElementById('historyBody');
+  if (!history||!history.length) {
+    tb.innerHTML='<tr><td colspan="8" class="empty-msg">종료된 트레이드 없음</td></tr>';
     return;
   }
-  tb.innerHTML = [...history].reverse().map(h => {
-    const sym = (h.market||'').replace('KRW-','');
-    const pnl = h.pnl || 0;
-    const pc  = pnl >= 0 ? 'up' : 'down';
-    const rc  = h.reason==='TP' ? 'var(--green)' :
-                h.reason==='SL' ? 'var(--red)'   : 'var(--sub)';
+  tb.innerHTML=[...history].reverse().map(h=>{
+    const sym=(h.market||'').replace('KRW-','');
+    const pnl=h.pnl||0;
+    const rc=h.reason==='TP'?'var(--green)':h.reason==='SL'?'var(--red)':'var(--sub)';
     return `<tr>
       <td><b>${sym}</b></td>
       <td>${gb(h.grade)}</td>
       <td>${fp(h.entry_price)}</td>
       <td>${fp(h.close_price)}</td>
-      <td class="${pc}" style="font-weight:600">${fPct(pnl)}</td>
+      <td class="${pnl>=0?'up':'down'}" style="font-weight:600">${fPct(pnl)}</td>
       <td style="color:${rc};font-weight:600">${h.reason||'–'}</td>
       <td>${(h.entered_at||'').substring(5,16)}</td>
       <td>${(h.closed_at||'').substring(5,16)}</td>
@@ -806,109 +721,98 @@ function renderHistory(history) {
   }).join('');
 }
 
-// ── 이벤트 패널 ───────────────────────────────────────
+// 이벤트
 async function fetchEvents() {
   try {
-    const r = await fetch('/api/events');
-    const d = await r.json();
-    const el = document.getElementById('evtList');
-    if (!d.events || !d.events.length) {
-      el.innerHTML = '<div class="empty-msg" style="padding:16px">이벤트 없음</div>';
+    const r=await fetch('/api/events');
+    const d=await r.json();
+    const el=document.getElementById('evtList');
+    if (!d.events||!d.events.length) {
+      el.innerHTML='<div class="empty-msg" style="padding:16px">이벤트 없음</div>';
       return;
     }
-    el.innerHTML = [...d.events].reverse().map(e => {
-      if (!e || typeof e !== 'object') return '';
+    el.innerHTML=[...d.events].reverse().map(e=>{
+      if (!e||typeof e!=='object') return '';
       return `<div class="evt-item ${e.type||'system'}">
         <span class="evt-time">${e.time||''}</span>
         <span class="evt-msg">${e.message||''}</span>
       </div>`;
     }).join('');
-  } catch(e) {}
+  } catch(e){}
 }
 
-// ── 상태 조회 ─────────────────────────────────────────
 async function fetchState() {
   try {
-    const r = await fetch('/api/state');
-    const d = await r.json();
-    if (d.error) { console.error('/api/state error:', d.error); return; }
-    updateBtc(d.state || {});
-    updateStatus(d.state || {});
+    const r=await fetch('/api/state');
+    const d=await r.json();
+    if (d.error){console.error('/api/state:',d.error);return;}
+    updateBtc(d.state||{});
+    updateStatus(d.state||{});
     updateStats(d);
     renderWatch(d.watch);
     renderActive(d.active);
     renderDeep(d.deep);
     renderHistory(d.history);
-  } catch(e) { console.error('fetchState:', e); }
+  } catch(e){console.error('fetchState:',e);}
 }
 
-// ── 즉시 스캔 ─────────────────────────────────────────
 async function triggerScan() {
-  const btn = document.querySelector('.scan-btn');
-  btn.textContent = '⏳ 스캔 중...';
-  btn.disabled = true;
+  const btn=document.querySelector('.scan-btn');
+  btn.textContent='⏳ 스캔 중...'; btn.disabled=true;
   toast('🔄 스캔 요청 중...');
   try {
-    const r = await fetch('/api/scan', {method:'POST'});
-    const d = await r.json();
+    const r=await fetch('/api/scan',{method:'POST'});
+    const d=await r.json();
     if (d.success) {
       toast('✅ 스캔 시작! 결과 업데이트 중...');
-      let cnt = 0;
-      const p = setInterval(() => {
+      let cnt=0;
+      const p=setInterval(()=>{
         fetchState(); fetchEvents(); cnt++;
-        if (cnt >= 8) {
-          clearInterval(p);
-          btn.textContent = '🔄 즉시스캔';
-          btn.disabled = false;
-        }
-      }, 5000);
+        if (cnt>=8){clearInterval(p);btn.textContent='🔄 즉시스캔';btn.disabled=false;}
+      },5000);
     } else {
-      toast('❌ ' + d.message);
-      btn.textContent = '🔄 즉시스캔';
-      btn.disabled = false;
+      toast('❌ '+d.message);
+      btn.textContent='🔄 즉시스캔'; btn.disabled=false;
     }
-  } catch(e) {
+  } catch(e){
     toast('❌ 요청 실패');
-    btn.textContent = '🔄 즉시스캔';
-    btn.disabled = false;
+    btn.textContent='🔄 즉시스캔'; btn.disabled=false;
   }
 }
 
-// ── Watch 관리 ────────────────────────────────────────
 async function doActivate(market) {
-  if (!confirm(market.replace('KRW-','') + ' 즉시 진입하시겠습니까?')) return;
-  const r = await fetch('/api/watch/activate', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({market})
+  if (!confirm(market.replace('KRW-','')+' 즉시 진입하시겠습니까?')) return;
+  const r=await fetch('/api/watch/activate',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({market})
   });
-  const d = await r.json();
-  toast(d.success ? '✅ '+d.message : '❌ '+d.message);
+  const d=await r.json();
+  toast(d.success?'✅ '+d.message:'❌ '+d.message);
   fetchState(); fetchEvents();
 }
 
 async function doRemove(market) {
-  if (!confirm(market.replace('KRW-','') + ' Watch에서 제거하시겠습니까?')) return;
-  const r = await fetch('/api/watch/remove', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({market})
+  if (!confirm(market.replace('KRW-','')+' Watch에서 제거하시겠습니까?')) return;
+  const r=await fetch('/api/watch/remove',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({market})
   });
-  const d = await r.json();
-  toast(d.success ? '🗑️ '+d.message : '❌ '+d.message);
+  const d=await r.json();
+  toast(d.success?'🗑️ '+d.message:'❌ '+d.message);
   fetchState();
 }
 
 async function doClose(market) {
-  if (!confirm(market.replace('KRW-','') + ' 포지션을 종료하시겠습니까?')) return;
-  const r = await fetch('/api/active/close', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({market})
+  if (!confirm(market.replace('KRW-','')+' 포지션을 종료하시겠습니까?')) return;
+  const r=await fetch('/api/active/close',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({market})
   });
-  const d = await r.json();
-  toast(d.success ? '🔴 '+d.message : '❌ '+d.message);
+  const d=await r.json();
+  toast(d.success?'🔴 '+d.message:'❌ '+d.message);
   fetchState(); fetchEvents();
 }
 
-// ── 초기화 & 폴링 ─────────────────────────────────────
 fetchState();
 fetchEvents();
 setInterval(fetchState,  15000);
@@ -939,18 +843,14 @@ def api_state():
         active  = sc._load_json(sc.ACTIVE_FILE,  [])
         deep    = sc._load_json(sc.DEEP_FILE,    [])
         history = sc._load_json(sc.HISTORY_FILE, [])
-
         total_trades = len(history)
         win_trades   = len([h for h in history if h.get('pnl', 0) > 0])
         total_pnl    = round(sum(h.get('pnl', 0) for h in history), 2)
-
         return jsonify({
-            'state': {
-                **state,
-                'total_trades': total_trades,
-                'win_trades':   win_trades,
-                'total_pnl':    total_pnl,
-            },
+            'state': {**state,
+                      'total_trades': total_trades,
+                      'win_trades':   win_trades,
+                      'total_pnl':    total_pnl},
             'watch':     watch,
             'active':    active,
             'deep':      deep,
@@ -1019,17 +919,10 @@ def api_config():
         'allowed_grades':      ['S', 'A', 'B'],
     })
 
-
-# ── 앱 시작 ───────────────────────────────────────────
 if __name__ == '__main__':
-    import logging
-    log = logging.getLogger(__name__)
-
     print(f'✅ Dashboard {DASHBOARD_VERSION} + Scanner {sc.VERSION} 시작')
     print(f'   MTF Setup  : {sc.MTF_VERSION}')
-    print(f'   허용 등급  : S / A / B')
-    print(f'   entry_price: 등록 시점 고정 (재스캔 갱신 안 함)')
-    print(f'   price_change: 등록가 대비 변동률')
+    print(f'   v3.0.5: 일봉 단기/중기 K방향 점수+시각 반영')
 
     loops = [
         ('scanner',        sc.scanner_loop),
@@ -1041,8 +934,6 @@ if __name__ == '__main__':
     ]
     for name, fn in loops:
         threading.Thread(target=fn, name=name, daemon=True).start()
-
-    print(f'   루프 {len(loops)}개 시작: {" / ".join(n for n,_ in loops)}')
+    print(f'   루프 {len(loops)}개: {" / ".join(n for n,_ in loops)}')
     print(f'🚀 http://0.0.0.0:{sc.PORT}')
-
     app.run(host='0.0.0.0', port=sc.PORT, debug=False)
