@@ -1,10 +1,9 @@
 """
-dashboard.py v3.0.1
+dashboard.py v3.0.2
 변경사항:
-- BTC 헤더: KRW + USD, 일봉MA20 + 주봉MA20 표시
-- 실시간 상태바 (스캐닝중 / Watch재스캔중 / 가격체크중 / DEEP스캔중)
-- 우하단 이벤트 알림 패널 (최근 20개)
-- 점수/등급 일치 (mtf_setup v3.0.1 반영)
+- Watch 테이블: 등록가 옆 현재가 + 등락폭 표시
+- C/X/- 등급 Watch 미표시 (scanner에서 차단)
+- 점수바 색상 등급과 일치
 """
 
 import os
@@ -15,7 +14,7 @@ from flask import Flask, jsonify, request, render_template_string
 import scanner
 import mtf_setup
 
-DASHBOARD_VERSION = 'v3.0.1'
+DASHBOARD_VERSION = 'v3.0.2'
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,8 +52,6 @@ body{ background:var(--bg); color:var(--text);
 }
 .header-left{ display:flex; align-items:center; gap:10px; }
 .header h1{ font-size:16px; font-weight:700; color:var(--blue); }
-
-/* 버전 배지 */
 .version-badge{
   background:#1f2937; border:1px solid var(--border);
   border-radius:12px; padding:3px 10px; font-size:11px;
@@ -69,22 +66,15 @@ body{ background:var(--bg); color:var(--text);
   white-space:pre-line; line-height:1.6;
 }
 
-/* BTC 정보 블록 */
-.btc-block{
-  display:flex; align-items:center; gap:20px; flex-wrap:wrap;
-}
-.btc-main{
-  font-size:14px; font-weight:700; color:var(--text);
-}
+/* ── BTC 블록 ── */
+.btc-block{ display:flex; align-items:center; gap:20px; flex-wrap:wrap; }
+.btc-main{ font-size:14px; font-weight:700; color:var(--text); }
 .btc-usd{ font-size:12px; color:var(--sub); margin-left:4px; }
-.btc-ma-row{
-  display:flex; gap:14px; font-size:11px;
-}
+.btc-ma-row{ display:flex; gap:14px; font-size:11px; margin-top:4px; }
 .ma-item{ display:flex; align-items:center; gap:4px; }
 .ma-label{ color:var(--sub); }
-.ma-val{ font-weight:600; }
-.ma-above{ color:var(--green); }
-.ma-below{ color:var(--red); }
+.ma-above{ color:var(--green); font-weight:600; }
+.ma-below{ color:var(--red);   font-weight:600; }
 .ma-badge-up{
   background:#1a3a2a; color:var(--green);
   border-radius:4px; padding:1px 5px; font-size:10px;
@@ -93,7 +83,6 @@ body{ background:var(--bg); color:var(--text);
   background:#3a1a1a; color:var(--red);
   border-radius:4px; padding:1px 5px; font-size:10px;
 }
-
 .header-right{ display:flex; align-items:center; gap:10px; }
 .countdown{ font-size:12px; color:var(--sub); }
 .countdown span{ color:var(--yellow); font-weight:700; }
@@ -107,10 +96,10 @@ body{ background:var(--bg); color:var(--text);
 
 /* ── 상태바 ── */
 .status-bar{
-  display:flex; align-items:center; gap:8px;
+  display:flex; align-items:center; gap:0;
   padding:5px 20px; background:#0d1117;
   border-bottom:1px solid var(--border);
-  font-size:11px; min-height:26px;
+  font-size:11px; min-height:28px; flex-wrap:wrap;
 }
 .status-dot{
   width:7px; height:7px; border-radius:50%;
@@ -121,17 +110,15 @@ body{ background:var(--bg); color:var(--text);
   animation:pulse 1.2s infinite;
 }
 @keyframes pulse{
-  0%,100%{ opacity:1; }
-  50%{ opacity:0.3; }
+  0%,100%{ opacity:1; } 50%{ opacity:0.3; }
 }
 .status-item{
-  display:flex; align-items:center; gap:4px;
-  color:var(--sub); padding:0 6px;
+  display:flex; align-items:center; gap:5px;
+  color:var(--sub); padding:0 12px;
   border-right:1px solid var(--border);
 }
-.status-item:last-child{ border-right:none; }
+.status-item:last-child{ border-right:none; margin-left:auto; }
 .status-item.on{ color:var(--yellow); }
-.status-sep{ color:var(--border); }
 
 /* ── 통계 카드 ── */
 .stats-grid{
@@ -155,9 +142,10 @@ body{ background:var(--bg); color:var(--text);
   border-bottom:1px solid var(--border);
 }
 .tab{
-  padding:8px 16px; cursor:pointer; border-radius:6px 6px 0 0;
-  font-size:13px; color:var(--sub);
-  border:1px solid transparent; border-bottom:none;
+  padding:8px 16px; cursor:pointer;
+  border-radius:6px 6px 0 0; font-size:13px;
+  color:var(--sub); border:1px solid transparent;
+  border-bottom:none; transition:all 0.15s;
 }
 .tab.active{
   background:var(--card); color:var(--text);
@@ -186,11 +174,19 @@ tr:hover td{ background:#1c2128; }
 .g-X{ background:#3a1a1a; color:var(--red); }
 
 /* ── KD 셀 ── */
-.kd-os{ color:var(--green); }
-.kd-ob{ color:var(--red); }
-.kd-neu{ color:var(--sub); }
-.kd-gc{ color:var(--green); font-weight:700; }
-.kd-dc{ color:var(--red); font-weight:700; }
+.kd-os { color:var(--green); }
+.kd-ob { color:var(--red);   }
+.kd-neu{ color:var(--sub);   }
+.kd-gc { color:var(--green); font-weight:700; }
+.kd-dc { color:var(--red);   font-weight:700; }
+
+/* ── 가격 변화 ── */
+.price-cell{ line-height:1.5; }
+.price-reg { font-size:12px; color:var(--text); }
+.price-cur { font-size:11px; color:var(--sub); }
+.price-up  { color:var(--green); font-weight:600; }
+.price-dn  { color:var(--red);   font-weight:600; }
+.price-neu { color:var(--sub); }
 
 /* ── PnL ── */
 .pnl-pos{ color:var(--green); font-weight:700; }
@@ -202,12 +198,13 @@ tr:hover td{ background:#1c2128; }
 .btn-entry { background:#1a3a2a; color:var(--green); }
 .btn-remove{ background:#3a1a1a; color:var(--red); }
 .btn-close { background:#2a1a1a; color:var(--orange); }
-.btn:hover{ opacity:0.8; }
+.btn:hover { opacity:0.8; }
 
 /* ── 가이드 박스 ── */
 .guide-box{
   background:var(--card); border:1px solid var(--border);
-  border-radius:10px; padding:12px 16px; margin-bottom:14px; font-size:12px;
+  border-radius:10px; padding:12px 16px;
+  margin-bottom:14px; font-size:12px;
 }
 .guide-box h3{ font-size:13px; margin-bottom:6px; color:var(--blue); }
 .guide-row{ display:flex; gap:20px; flex-wrap:wrap; }
@@ -216,7 +213,8 @@ tr:hover td{ background:#1c2128; }
 
 /* ── DEEP 그리드 ── */
 .deep-grid{
-  display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr));
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(190px,1fr));
   gap:10px;
 }
 .deep-card{
@@ -225,7 +223,7 @@ tr:hover td{ background:#1c2128; }
 }
 .deep-card .d-ticker{ font-size:14px; font-weight:700; margin-bottom:4px; }
 .deep-card .d-rs{ font-size:20px; font-weight:700; color:var(--orange); }
-.deep-card .d-info{ font-size:11px; color:var(--sub); margin-top:4px; line-height:1.6; }
+.deep-card .d-info{ font-size:11px; color:var(--sub); margin-top:4px; line-height:1.7; }
 
 /* ── 빈 상태 ── */
 .empty-state{ text-align:center; padding:40px 20px; color:var(--sub); }
@@ -234,48 +232,41 @@ tr:hover td{ background:#1c2128; }
 /* ── 이벤트 패널 ── */
 #eventPanel{
   position:fixed; bottom:20px; right:20px;
-  width:300px; max-height:360px;
+  width:310px; max-height:370px;
   background:#161b22; border:1px solid var(--border);
   border-radius:12px; z-index:500;
   display:flex; flex-direction:column;
   box-shadow:0 4px 20px rgba(0,0,0,0.5);
+  transition: max-height 0.2s ease;
 }
 .event-header{
   display:flex; align-items:center; justify-content:space-between;
   padding:10px 14px; border-bottom:1px solid var(--border);
-  font-size:12px; font-weight:700;
+  font-size:12px; font-weight:700; cursor:pointer;
 }
-.event-toggle{
-  background:none; border:none; color:var(--sub);
-  cursor:pointer; font-size:13px;
-}
-#eventList{
-  overflow-y:auto; flex:1; padding:6px 0;
-}
+.event-toggle{ background:none; border:none; color:var(--sub); font-size:13px; }
+#eventList{ overflow-y:auto; flex:1; padding:4px 0; }
 .event-item{
-  display:flex; align-items:flex-start; gap:6px;
+  display:flex; align-items:flex-start; gap:5px;
   padding:5px 12px; font-size:11px; line-height:1.4;
   border-bottom:1px solid #1c2128;
 }
 .event-item:last-child{ border-bottom:none; }
 .event-time{ color:var(--sub); white-space:nowrap; min-width:34px; }
+.event-emoji{ min-width:16px; }
 .event-msg{ color:var(--text); word-break:break-all; }
-.event-new{
-  animation:fadeIn 0.4s ease;
-}
+.event-new{ animation:fadeIn 0.5s ease; }
 @keyframes fadeIn{
-  from{ background:#1f2937; }
-  to{   background:transparent; }
+  from{ background:#1a2f1a; } to{ background:transparent; }
 }
-#eventPanel.collapsed #eventList{ display:none; }
-#eventPanel.collapsed{ max-height:42px; }
+#eventPanel.collapsed{ max-height:42px; overflow:hidden; }
 
 /* ── 토스트 ── */
 #toast{
   position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
   background:#1f2937; border:1px solid var(--border);
   border-radius:8px; padding:10px 20px; font-size:13px;
-  display:none; z-index:9999;
+  display:none; z-index:9999; white-space:nowrap;
 }
 </style>
 </head>
@@ -292,32 +283,30 @@ tr:hover td{ background:#1c2128; }
 Scanner  {{ scanner_version }}
 MTF Setup {{ mtf_version }}
 
-📋 v3.0.1 변경이력
-• BTC 일봉/주봉 MA20 (KRW+USD)
-• 실시간 스캔 상태바
-• 이벤트 알림 패널
-• 점수↔등급 완전 일치
-• 중복 스캔 방지</div>
+📋 v3.0.2 변경이력
+• C등급 Watch 등록/표시 완전 차단
+• Watch 등록가 옆 현재가+등락폭 표시
+• 점수바 색상 등급 일치
+• Watch 재스캔 시 등급 하락 자동 제거</div>
       </div>
     </div>
 
-    <!-- BTC 정보 -->
     <div class="btc-block">
       <div>
         <div>
           <span class="btc-main" id="btcPrice">-</span>
-          <span class="btc-usd" id="btcPriceUsd"></span>
+          <span class="btc-usd"  id="btcPriceUsd"></span>
         </div>
-        <div class="btc-ma-row" style="margin-top:4px;">
+        <div class="btc-ma-row">
           <div class="ma-item">
             <span class="ma-label">일봉MA20</span>
-            <span class="ma-val" id="dailyMa20">-</span>
+            <span id="dailyMa20">-</span>
             <span id="dailyMa20Usd" class="btc-usd"></span>
             <span id="dailyMa20Badge"></span>
           </div>
           <div class="ma-item">
             <span class="ma-label">주봉MA20</span>
-            <span class="ma-val" id="weeklyMa20">-</span>
+            <span id="weeklyMa20">-</span>
             <span id="weeklyMa20Usd" class="btc-usd"></span>
             <span id="weeklyMa20Badge"></span>
           </div>
@@ -336,7 +325,7 @@ MTF Setup {{ mtf_version }}
 <div class="status-bar">
   <div class="status-item" id="statusScan">
     <span class="status-dot" id="dotScan"></span>
-    <span id="labelScan">대기 중</span>
+    <span id="labelScan">전체 스캔 대기</span>
   </div>
   <div class="status-item" id="statusWatch">
     <span class="status-dot" id="dotWatch"></span>
@@ -350,9 +339,9 @@ MTF Setup {{ mtf_version }}
     <span class="status-dot" id="dotDeep"></span>
     <span id="labelDeep">DEEP 대기</span>
   </div>
-  <div class="status-item" style="margin-left:auto; border-right:none;">
-    <span style="color:var(--sub); font-size:11px;">
-      마지막 스캔: <span id="lastScan">-</span>
+  <div class="status-item">
+    <span style="color:var(--sub)">마지막 스캔:
+      <span id="lastScan" style="color:var(--text)">-</span>
     </span>
   </div>
 </div>
@@ -362,7 +351,7 @@ MTF Setup {{ mtf_version }}
   <div class="stat-card">
     <div class="stat-label">📋 Watch</div>
     <div class="stat-value" id="statWatch">-</div>
-    <div class="stat-sub">감시 중</div>
+    <div class="stat-sub">B등급 이상</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">✅ Active</div>
@@ -399,50 +388,77 @@ MTF Setup {{ mtf_version }}
   <div class="tab" onclick="switchTab('history')">📊 History</div>
 </div>
 
-<!-- Watch -->
+<!-- Watch 탭 -->
 <div id="tab-watch" class="tab-content active">
   <div class="guide-box">
-    <h3>📌 Watch 진입 기준</h3>
+    <h3>📌 Watch 기준 (B등급 이상만 등록)</h3>
     <div class="guide-row">
-      <div class="guide-item">등록조건 <span>일봉 장기K ≤ 20</span></div>
+      <div class="guide-item">등록조건 <span>일봉장기K≤20 + B등급 이상</span></div>
       <div class="guide-item">자동진입 <span>일봉장기 과매도 + 4h/1h 골든크로스</span></div>
       <div class="guide-item">진입차단 <span>과매수(K≥80) + 데드크로스</span></div>
+      <div class="guide-item">자동제거 <span>BUY_NO 감지 또는 등급 C 이하 하락</span></div>
     </div>
   </div>
   <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>종목</th><th>등급</th><th>점수</th><th>등록가</th>
-        <th>일봉 장기 K/D</th><th>일봉 중기 K/D</th><th>일봉 단기 K/D</th>
-        <th>4h K/D</th><th>1h K/D</th>
-        <th>4h GC</th><th>1h GC</th>
-        <th>거래량</th><th>바닥일수</th><th>등록일</th><th>만료</th><th>관리</th>
+        <th>종목</th>
+        <th>등급</th>
+        <th>점수</th>
+        <th>등록가 / 현재가</th>
+        <th>일봉 장기 K/D</th>
+        <th>일봉 중기 K/D</th>
+        <th>일봉 단기 K/D</th>
+        <th>4h K/D</th>
+        <th>1h K/D</th>
+        <th>4h GC</th>
+        <th>1h GC</th>
+        <th>거래량</th>
+        <th>바닥일수</th>
+        <th>등록일</th>
+        <th>만료</th>
+        <th>관리</th>
       </tr></thead>
       <tbody id="watchTable">
-        <tr><td colspan="16" class="empty-state">로딩 중...</td></tr>
+        <tr><td colspan="16">
+          <div class="empty-state"><div class="icon">📋</div>로딩 중...</div>
+        </td></tr>
       </tbody>
     </table>
   </div>
 </div>
 
-<!-- Active -->
+<!-- Active 탭 -->
 <div id="tab-active" class="tab-content">
   <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>종목</th><th>등급</th><th>진입가</th><th>현재가</th><th>수익률</th>
-        <th>TP</th><th>SL</th><th>유형</th>
-        <th>일봉장기K</th><th>4h K/D</th><th>1h K/D</th>
-        <th>거래량</th><th>진입일</th><th>만료</th><th>관리</th>
+        <th>종목</th>
+        <th>등급</th>
+        <th>진입가</th>
+        <th>현재가</th>
+        <th>수익률</th>
+        <th>TP</th>
+        <th>SL</th>
+        <th>유형</th>
+        <th>일봉장기K</th>
+        <th>4h K/D</th>
+        <th>1h K/D</th>
+        <th>거래량</th>
+        <th>진입일</th>
+        <th>만료</th>
+        <th>관리</th>
       </tr></thead>
       <tbody id="activeTable">
-        <tr><td colspan="15" class="empty-state">로딩 중...</td></tr>
+        <tr><td colspan="15">
+          <div class="empty-state"><div class="icon">✅</div>진입된 종목 없음</div>
+        </td></tr>
       </tbody>
     </table>
   </div>
 </div>
 
-<!-- DEEP -->
+<!-- DEEP 탭 -->
 <div id="tab-deep" class="tab-content">
   <div class="guide-box">
     <h3>🔥 DEEP 상대강도 기준</h3>
@@ -453,20 +469,30 @@ MTF Setup {{ mtf_version }}
       <div class="guide-item">B등급 <span>RS≥+2%</span></div>
     </div>
   </div>
-  <div id="deepBtcInfo" style="font-size:12px;color:var(--sub);margin-bottom:12px;"></div>
+  <div id="deepBtcInfo"
+    style="font-size:12px;color:var(--sub);margin-bottom:12px;"></div>
   <div id="deepGrid" class="deep-grid"></div>
 </div>
 
-<!-- History -->
+<!-- History 탭 -->
 <div id="tab-history" class="tab-content">
   <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>종목</th><th>등급</th><th>진입가</th><th>종료가</th>
-        <th>수익률</th><th>종료사유</th><th>유형</th><th>진입일</th><th>종료일</th>
+        <th>종목</th>
+        <th>등급</th>
+        <th>진입가</th>
+        <th>종료가</th>
+        <th>수익률</th>
+        <th>종료사유</th>
+        <th>유형</th>
+        <th>진입일</th>
+        <th>종료일</th>
       </tr></thead>
       <tbody id="historyTable">
-        <tr><td colspan="9" class="empty-state">로딩 중...</td></tr>
+        <tr><td colspan="9">
+          <div class="empty-state"><div class="icon">📊</div>종료된 거래 없음</div>
+        </td></tr>
       </tbody>
     </table>
   </div>
@@ -474,9 +500,9 @@ MTF Setup {{ mtf_version }}
 
 <!-- ══ 이벤트 패널 ══ -->
 <div id="eventPanel">
-  <div class="event-header">
+  <div class="event-header" onclick="toggleEventPanel()">
     <span>📡 실시간 이벤트</span>
-    <button class="event-toggle" onclick="toggleEventPanel()">▼</button>
+    <button class="event-toggle" id="eventToggleBtn">▼</button>
   </div>
   <div id="eventList"></div>
 </div>
@@ -486,10 +512,9 @@ MTF Setup {{ mtf_version }}
 
 <script>
 // ── 전역 ────────────────────────────────────────────────────
-let _nextScan      = null;
-let _countdownTimer= null;
-let _lastEventTime = null;
-let _eventCollapsed= false;
+let _nextScan       = null;
+let _countdownTimer = null;
+let _collapsed      = false;
 
 // ── 탭 전환 ─────────────────────────────────────────────────
 function switchTab(name) {
@@ -501,7 +526,7 @@ function switchTab(name) {
   document.getElementById('tab-' + name).classList.add('active');
 }
 
-// ── 상태 갱신 ────────────────────────────────────────────────
+// ── 데이터 갱신 ──────────────────────────────────────────────
 async function fetchState() {
   try {
     const r = await fetch('/api/state');
@@ -540,21 +565,20 @@ function renderStats(s, d) {
   const history = d.history || [];
   const total   = history.length;
   const wins    = history.filter(h => (h.pnl_pct||0) > 0).length;
-  const pnlSum  = history.reduce((a,h) => a + (h.pnl_pct||0), 0);
+  const pnlSum  = history.reduce((a,h) => a+(h.pnl_pct||0), 0);
   const wr      = total > 0 ? Math.round(wins/total*100) : 0;
   const avg     = total > 0 ? (pnlSum/total).toFixed(2) : '0.00';
 
-  const wrEl = document.getElementById('statWinrate');
+  const wrEl  = document.getElementById('statWinrate');
   wrEl.textContent = total > 0 ? wr+'%' : '-';
   wrEl.style.color = wr >= 50 ? 'var(--green)' : 'var(--red)';
 
   const avgEl = document.getElementById('statAvgPnl');
   avgEl.textContent = total > 0 ? (avg>0?'+':'')+avg+'%' : '-';
-  avgEl.style.color = avg >= 0 ? 'var(--green)' : 'var(--red)';
+  avgEl.style.color = parseFloat(avg) >= 0 ? 'var(--green)' : 'var(--red)';
 
   set('statTradeCount', `${wins}승 / ${total}건`);
 
-  // 스캔 상태
   const scanStatus = document.getElementById('statScanStatus');
   if (s.running) {
     scanStatus.textContent = '⏳ 스캐닝 중...';
@@ -567,78 +591,44 @@ function renderStats(s, d) {
 
 // ── BTC 정보 ─────────────────────────────────────────────────
 function renderBtc(s) {
-  const price    = s.btc_price;
-  const priceUsd = s.btc_price_usd;
+  set('btcPrice',    s.btc_price ? Number(s.btc_price).toLocaleString()+' KRW' : '-');
+  set('btcPriceUsd', s.btc_price_usd ? `($${Number(s.btc_price_usd).toLocaleString()})` : '');
 
-  set('btcPrice', price ? Number(price).toLocaleString() + ' KRW' : '-');
-  set('btcPriceUsd', priceUsd ? `($${Number(priceUsd).toLocaleString()})` : '');
+  _renderMa('dailyMa20', 'dailyMa20Usd', 'dailyMa20Badge',
+    s.btc_daily_ma20, s.btc_daily_ma20_usd, s.btc_daily_above, s.btc_daily_pct);
+  _renderMa('weeklyMa20', 'weeklyMa20Usd', 'weeklyMa20Badge',
+    s.btc_weekly_ma20, s.btc_weekly_ma20_usd, s.btc_weekly_above, s.btc_weekly_pct);
+}
 
-  // 일봉 MA20
-  const dma  = s.btc_daily_ma20;
-  const dUsd = s.btc_daily_ma20_usd;
-  const dPct = s.btc_daily_pct;
-  const dAbove = s.btc_daily_above;
-  if (dma) {
-    const cls = dAbove ? 'ma-above' : 'ma-below';
-    document.getElementById('dailyMa20').innerHTML =
-      `<span class="${cls}">${Number(dma).toLocaleString()}</span>`;
-    document.getElementById('dailyMa20Usd').textContent =
-      dUsd ? `($${Number(dUsd).toLocaleString()})` : '';
-    document.getElementById('dailyMa20Badge').innerHTML =
-      dAbove
-        ? `<span class="ma-badge-up">▲ +${dPct}%</span>`
-        : `<span class="ma-badge-down">▼ ${dPct}%</span>`;
-  }
-
-  // 주봉 MA20
-  const wma  = s.btc_weekly_ma20;
-  const wUsd = s.btc_weekly_ma20_usd;
-  const wPct = s.btc_weekly_pct;
-  const wAbove = s.btc_weekly_above;
-  if (wma) {
-    const cls = wAbove ? 'ma-above' : 'ma-below';
-    document.getElementById('weeklyMa20').innerHTML =
-      `<span class="${cls}">${Number(wma).toLocaleString()}</span>`;
-    document.getElementById('weeklyMa20Usd').textContent =
-      wUsd ? `($${Number(wUsd).toLocaleString()})` : '';
-    document.getElementById('weeklyMa20Badge').innerHTML =
-      wAbove
-        ? `<span class="ma-badge-up">▲ +${wPct}%</span>`
-        : `<span class="ma-badge-down">▼ ${wPct}%</span>`;
-  }
+function _renderMa(valId, usdId, badgeId, ma, maUsd, above, pct) {
+  if (!ma) return;
+  const cls = above ? 'ma-above' : 'ma-below';
+  document.getElementById(valId).innerHTML =
+    `<span class="${cls}">${Number(ma).toLocaleString()}</span>`;
+  document.getElementById(usdId).textContent =
+    maUsd ? `($${Number(maUsd).toLocaleString()})` : '';
+  document.getElementById(badgeId).innerHTML = above
+    ? `<span class="ma-badge-up">▲ +${pct}%</span>`
+    : `<span class="ma-badge-down">▼ ${pct}%</span>`;
 }
 
 // ── 상태바 ───────────────────────────────────────────────────
 function renderStatusBar(s) {
-  function setStatus(dotId, labelId, itemId, active, text) {
-    const dot   = document.getElementById(dotId);
-    const label = document.getElementById(labelId);
-    const item  = document.getElementById(itemId);
-    dot.className   = 'status-dot' + (active ? ' active' : '');
-    label.textContent = text;
-    item.className  = 'status-item' + (active ? ' on' : '');
-  }
+  _setStatus('dotScan',  'labelScan',  'statusScan',
+    s.running,           s.running  ? '🔄 전체 스캐닝 중...'   : '전체 스캔 대기');
+  _setStatus('dotWatch', 'labelWatch', 'statusWatch',
+    s.watch_rescanning,  s.watch_rescanning ? '🔍 Watch 재스캔 중...' : 'Watch 재스캔 대기');
+  _setStatus('dotPrice', 'labelPrice', 'statusPrice',
+    s.price_checking,    s.price_checking   ? '💰 가격 체크 중...'    : '가격 체크 대기');
+  _setStatus('dotDeep',  'labelDeep',  'statusDeep',
+    s.deep_scanning,     s.deep_scanning    ? '🔥 DEEP 스캔 중...'    : 'DEEP 대기');
+  if (s.last_scan) set('lastScan', fmtDate(s.last_scan));
+}
 
-  setStatus('dotScan',  'labelScan',  'statusScan',
-    s.running,
-    s.running ? '🔄 전체 스캐닝 중...' : '전체 스캔 대기');
-
-  setStatus('dotWatch', 'labelWatch', 'statusWatch',
-    s.watch_rescanning,
-    s.watch_rescanning ? '🔍 Watch 재스캔 중...' : 'Watch 재스캔 대기');
-
-  setStatus('dotPrice', 'labelPrice', 'statusPrice',
-    s.price_checking,
-    s.price_checking ? '💰 가격 체크 중...' : '가격 체크 대기');
-
-  setStatus('dotDeep',  'labelDeep',  'statusDeep',
-    s.deep_scanning,
-    s.deep_scanning ? '🔥 DEEP 스캔 중...' : 'DEEP 대기');
-
-  // 마지막 스캔 시간
-  if (s.last_scan) {
-    set('lastScan', fmtDate(s.last_scan));
-  }
+function _setStatus(dotId, labelId, itemId, active, text) {
+  document.getElementById(dotId).className  = 'status-dot'+(active?' active':'');
+  document.getElementById(labelId).textContent = text;
+  document.getElementById(itemId).className = 'status-item'+(active?' on':'');
 }
 
 // ── Watch 테이블 ─────────────────────────────────────────────
@@ -646,18 +636,22 @@ function renderWatch(list) {
   const tb = document.getElementById('watchTable');
   if (!list.length) {
     tb.innerHTML = `<tr><td colspan="16">
-      <div class="empty-state"><div class="icon">📋</div>
-      일봉 장기K ≤ 20 조건 대기 중</div></td></tr>`;
+      <div class="empty-state">
+        <div class="icon">📋</div>
+        일봉 장기K≤20 + B등급 이상 조건 대기 중
+      </div></td></tr>`;
     return;
   }
-  list.sort((a,b) => (b.score||0) - (a.score||0));
+
+  list.sort((a,b) => (b.score||0)-(a.score||0));
+
   tb.innerHTML = list.map(w => {
     const exp = daysLeft(w.expire_at);
     return `<tr>
       <td><b>${w.ticker}</b></td>
       <td>${gradeBadge(w.grade)}</td>
-      <td>${scoreBar(w.score)}</td>
-      <td style="font-size:11px;">${w.reg_price ? Number(w.reg_price).toLocaleString() : '-'}</td>
+      <td>${scoreBar(w.score, w.grade)}</td>
+      <td class="price-cell">${priceCell(w.reg_price, w.current_price, w.price_change_pct)}</td>
       <td>${kdCell(w.daily_long_k,  w.daily_long_d)}</td>
       <td>${kdCell(w.daily_mid_k,   w.daily_mid_d)}</td>
       <td>${kdCell(w.daily_short_k, w.daily_short_d)}</td>
@@ -682,21 +676,21 @@ function renderActive(list) {
   const tb = document.getElementById('activeTable');
   if (!list.length) {
     tb.innerHTML = `<tr><td colspan="15">
-      <div class="empty-state"><div class="icon">✅</div>진입된 종목 없음</div></td></tr>`;
+      <div class="empty-state"><div class="icon">✅</div>진입된 종목 없음</div>
+    </td></tr>`;
     return;
   }
   tb.innerHTML = list.map(a => {
     const pnl    = a.pnl_pct ?? 0;
-    const pnlCls = pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
     const exp    = daysLeft(a.expire_at);
     return `<tr>
       <td><b>${a.ticker}</b></td>
       <td>${gradeBadge(a.grade)}</td>
-      <td>${Number(a.entry_price).toLocaleString()}</td>
-      <td>${a.current_price ? Number(a.current_price).toLocaleString() : '-'}</td>
-      <td class="${pnlCls}">${(pnl>=0?'+':'')+pnl.toFixed(2)}%</td>
-      <td style="color:var(--green);font-size:11px;">${Number(a.tp_price).toLocaleString()}</td>
-      <td style="color:var(--red);font-size:11px;">${Number(a.sl_price).toLocaleString()}</td>
+      <td>${fmtPrice(a.entry_price)}</td>
+      <td>${fmtPrice(a.current_price)}</td>
+      <td class="${pnl>=0?'pnl-pos':'pnl-neg'}">${(pnl>=0?'+':'')+pnl.toFixed(2)}%</td>
+      <td style="color:var(--green);font-size:11px;">${fmtPrice(a.tp_price)}</td>
+      <td style="color:var(--red);  font-size:11px;">${fmtPrice(a.sl_price)}</td>
       <td>${a.trade_type==='manual'?'👤수동':'🤖자동'}</td>
       <td>${kdVal(a.daily_long_k)}</td>
       <td>${kdCell(a.h4_short_k, a.h4_short_d)}</td>
@@ -704,7 +698,8 @@ function renderActive(list) {
       <td>${volBadge(a.vol_ratio)}</td>
       <td style="font-size:11px;">${fmtDate(a.entry_at)}</td>
       <td style="font-size:11px;color:${exp<=4?'var(--yellow)':'var(--sub)'};">${exp}일</td>
-      <td><button class="btn btn-close" onclick="closeActive('${a.ticker}')">종료</button></td>
+      <td><button class="btn btn-close"
+        onclick="closeActive('${a.ticker}')">종료</button></td>
     </tr>`;
   }).join('');
 }
@@ -713,11 +708,11 @@ function renderActive(list) {
 function renderDeep(list, s) {
   const p1h = s.btc_1h_pct;
   const p4h = s.btc_4h_pct;
-  set('deepBtcInfo',
+  document.getElementById('deepBtcInfo').textContent =
     `BTC 변화율: 1h ${p1h!=null?(p1h>0?'+':'')+p1h+'%':'-'} / `+
     `4h ${p4h!=null?(p4h>0?'+':'')+p4h+'%':'-'} | `+
-    `마지막 DEEP: ${s.last_deep_scan ? fmtDate(s.last_deep_scan) : '대기 중'}`
-  );
+    `마지막 DEEP: ${s.last_deep_scan?fmtDate(s.last_deep_scan):'대기 중'}`;
+
   const grid = document.getElementById('deepGrid');
   if (!list.length) {
     grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;">
@@ -745,18 +740,21 @@ function renderHistory(list) {
   const tb = document.getElementById('historyTable');
   if (!list.length) {
     tb.innerHTML = `<tr><td colspan="9">
-      <div class="empty-state"><div class="icon">📊</div>종료된 거래 없음</div></td></tr>`;
+      <div class="empty-state"><div class="icon">📊</div>종료된 거래 없음</div>
+    </td></tr>`;
     return;
   }
-  const rc = {TP:'var(--green)',SL:'var(--red)',
-              '시간만료':'var(--yellow)','수동종료':'var(--sub)'};
+  const rc = {
+    'TP':'var(--green)', 'SL':'var(--red)',
+    '시간만료':'var(--yellow)', '수동종료':'var(--sub)'
+  };
   tb.innerHTML = [...list].reverse().map(h => {
     const pnl = h.pnl_pct ?? 0;
     return `<tr>
       <td><b>${h.ticker}</b></td>
       <td>${gradeBadge(h.grade)}</td>
-      <td>${Number(h.entry_price).toLocaleString()}</td>
-      <td>${h.close_price ? Number(h.close_price).toLocaleString() : '-'}</td>
+      <td>${fmtPrice(h.entry_price)}</td>
+      <td>${fmtPrice(h.close_price)}</td>
       <td class="${pnl>=0?'pnl-pos':'pnl-neg'}">${(pnl>=0?'+':'')+pnl.toFixed(2)}%</td>
       <td style="color:${rc[h.close_reason]||'var(--sub)'};">${h.close_reason??'-'}</td>
       <td>${h.trade_type==='manual'?'👤수동':'🤖자동'}</td>
@@ -770,25 +768,22 @@ function renderHistory(list) {
 function renderEvents(events) {
   const list = document.getElementById('eventList');
   if (!events.length) {
-    list.innerHTML = `<div style="padding:12px;color:var(--sub);font-size:11px;text-align:center;">
-      이벤트 없음</div>`;
+    list.innerHTML = `<div style="padding:12px;color:var(--sub);
+      font-size:11px;text-align:center;">이벤트 없음</div>`;
     return;
   }
-  const recent = [...events].reverse().slice(0, 20);
-  list.innerHTML = recent.map((e, i) => `
+  list.innerHTML = [...events].reverse().slice(0,20).map((e,i) => `
     <div class="event-item ${i===0?'event-new':''}">
       <span class="event-time">${e.time}</span>
-      <span style="margin-right:4px;">${e.emoji||''}</span>
+      <span class="event-emoji">${e.emoji||''}</span>
       <span class="event-msg">${e.msg}</span>
     </div>`).join('');
 }
 
 function toggleEventPanel() {
-  const panel = document.getElementById('eventPanel');
-  const btn   = panel.querySelector('.event-toggle');
-  _eventCollapsed = !_eventCollapsed;
-  panel.classList.toggle('collapsed', _eventCollapsed);
-  btn.textContent = _eventCollapsed ? '▲' : '▼';
+  _collapsed = !_collapsed;
+  document.getElementById('eventPanel').classList.toggle('collapsed', _collapsed);
+  document.getElementById('eventToggleBtn').textContent = _collapsed ? '▲' : '▼';
 }
 
 // ── 카운트다운 ───────────────────────────────────────────────
@@ -797,12 +792,12 @@ function updateCountdown(nextScan) {
   _nextScan = new Date(nextScan);
   if (_countdownTimer) clearInterval(_countdownTimer);
   _countdownTimer = setInterval(() => {
-    const diff = Math.max(0, Math.floor((_nextScan - Date.now()) / 1000));
+    const diff = Math.max(0, Math.floor((_nextScan-Date.now())/1000));
     const m = String(Math.floor(diff/60)).padStart(2,'0');
     const s = String(diff%60).padStart(2,'0');
     const el = document.getElementById('countdown');
     if (el) el.textContent = `${m}:${s}`;
-    if (diff === 0) clearInterval(_countdownTimer);
+    if (diff===0) clearInterval(_countdownTimer);
   }, 1000);
 }
 
@@ -871,7 +866,7 @@ async function closeActive(ticker) {
   if (d.success) { fetchState(); fetchEvents(); }
 }
 
-// ── 헬퍼 ─────────────────────────────────────────────────────
+// ── 렌더 헬퍼 ────────────────────────────────────────────────
 function set(id, val) {
   const el = document.getElementById(id);
   if (el) el.textContent = val;
@@ -882,28 +877,53 @@ function gradeBadge(g) {
   return `<span class="grade ${cls}">${g||'-'}</span>`;
 }
 
-function scoreBar(score) {
+function scoreBar(score, grade) {
   const s   = score ?? 0;
   const pct = Math.min(s, 100);
-  const col = s>=80?'var(--green)':s>=65?'var(--blue)':
-              s>=45?'var(--yellow)':'var(--sub)';
+  // 등급과 점수바 색상 일치
+  const col = grade==='S' ? 'var(--green)'
+            : grade==='A' ? 'var(--blue)'
+            : grade==='B' ? 'var(--yellow)'
+            : 'var(--sub)';
   return `<div style="display:flex;align-items:center;gap:5px;">
     <div style="width:50px;height:6px;background:#1c2128;border-radius:3px;">
-      <div style="width:${pct}%;height:100%;background:${col};border-radius:3px;"></div>
+      <div style="width:${pct}%;height:100%;background:${col};
+                  border-radius:3px;"></div>
     </div>
-    <span style="color:${col};font-size:11px;">${s}</span>
+    <span style="color:${col};font-size:11px;font-weight:700;">${s}</span>
   </div>`;
 }
 
+function priceCell(regPrice, curPrice, changePct) {
+  const reg = regPrice ? Number(regPrice).toLocaleString() : '-';
+  if (!curPrice) {
+    return `<div class="price-reg">${reg}</div>`;
+  }
+  const cur  = Number(curPrice).toLocaleString();
+  const pct  = changePct ?? 0;
+  const sign = pct > 0 ? '+' : '';
+  const cls  = pct > 0 ? 'price-up' : pct < 0 ? 'price-dn' : 'price-neu';
+  return `<div class="price-reg">${reg}</div>
+          <div class="price-cur">
+            ${cur}
+            <span class="${cls}">(${sign}${pct.toFixed(2)}%)</span>
+          </div>`;
+}
+
+function fmtPrice(p) {
+  if (p == null) return '-';
+  return Number(p).toLocaleString();
+}
+
 function kdCell(k, d) {
-  if (k == null) return '<span class="kd-neu">-</span>';
-  const kr = Math.round(k*10)/10;
-  const dr = d!=null ? Math.round(d*10)/10 : null;
-  let kCls = k<=20?'kd-os':k>=80?'kd-ob':'kd-neu';
-  let arrow = '';
+  if (k==null) return '<span class="kd-neu">-</span>';
+  const kr   = Math.round(k*10)/10;
+  const dr   = d!=null ? Math.round(d*10)/10 : null;
+  const kCls = k<=20?'kd-os':k>=80?'kd-ob':'kd-neu';
+  let arrow  = '';
   if (dr!=null) {
-    if (k>d)  arrow = '<span class="kd-gc"> ↑</span>';
-    if (k<d)  arrow = '<span class="kd-dc"> ↓</span>';
+    if (k>d) arrow = '<span class="kd-gc"> ↑</span>';
+    if (k<d) arrow = '<span class="kd-dc"> ↓</span>';
   }
   const dStr = dr!=null ? `<span class="kd-neu">/${dr}</span>` : '';
   return `<span class="${kCls}">${kr}</span>${dStr}${arrow}`;
@@ -934,8 +954,8 @@ function fmtDate(iso) {
   if (!iso) return '-';
   try {
     const d = new Date(iso);
-    return `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} `+
-           `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    return `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} `
+         + `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
   } catch { return '-'; }
 }
 
@@ -1000,8 +1020,7 @@ def api_state():
 
 @app.route('/api/events')
 def api_events():
-    events = scanner.load_events()
-    return jsonify({'events': events[-30:]})
+    return jsonify({'events': scanner.load_events()[-30:]})
 
 @app.route('/api/scan', methods=['POST'])
 def api_scan():
@@ -1060,6 +1079,7 @@ def api_config():
         'btc_drop_4h_pct':           scanner.BTC_DROP_4H_PCT,
         'request_delay':             scanner.REQUEST_DELAY,
         'max_workers':               scanner.MAX_WORKERS,
+        'watch_allow_grades':        list(scanner.WATCH_ALLOW_GRADES),
     })
 
 
@@ -1086,8 +1106,9 @@ if __name__ == '__main__':
         t.start()
 
     print(f'✅ Dashboard {DASHBOARD_VERSION} + Scanner {scanner.VERSION} 시작')
-    print(f'   MTF Setup: {mtf_setup.VERSION}')
-    print(f'   루프 6개: scanner / watch_rescan / price_check / active_monitor / deep_scan / daily_summary')
+    print(f'   MTF Setup  : {mtf_setup.VERSION}')
+    print(f'   Watch 허용 : B등급 이상만')
+    print(f'   루프 6개   : scanner/watch_rescan/price_check/active_monitor/deep_scan/daily_summary')
 
     port = int(os.environ.get('PORT', 5000))
     print(f'🚀 http://0.0.0.0:{port}')
