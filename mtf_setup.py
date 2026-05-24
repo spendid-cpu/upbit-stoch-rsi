@@ -1,661 +1,383 @@
 """
-mtf_setup.py v4.2.2
-Upbit MTF Stochastic RSI 분석 모듈
-
-변경사항 (v4.2.2):
-- calc_direction: golden_cross 계산 로직 수정 (k_series[-2] vs d 비교)
-- calc_entry_strength: 일봉K≤2 횡보/하락이어도 최소 레벨 1(👀) 보장
-- calc_entry_strength: 일봉K≤2 상승/반등이면 최소 레벨 2(🎯) 보장 (기존 유지)
-- get_direction_icon: golden_cross 필드 방어 처리 강화
+mtf_setup.py v3.0.0
+Stochastic RSI 단기/중기/장기 K+D 계산
+- 단기: RSI5, Stoch5, K3, D3
+- 중기: RSI10, Stoch10, K6, D6
+- 장기: RSI20, Stoch20, K12, D12
 """
 
-import os
-import math
-import logging
+import numpy as np
+from typing import Optional
 
-logger = logging.getLogger(__name__)
+VERSION = 'v3.0.0'
 
-VERSION = 'v4.2.2'
+# ── 파라미터 정의 ─────────────────────────────────────────────
+PARAMS = {
+    'short':  {'rsi': 5,  'stoch': 5,  'k_smooth': 3,  'd_smooth': 3},
+    'mid':    {'rsi': 10, 'stoch': 10, 'k_smooth': 6,  'd_smooth': 6},
+    'long':   {'rsi': 20, 'stoch': 20, 'k_smooth': 12, 'd_smooth': 12},
+}
 
-# ── 기본 상수 ────────────────────────────────────────────────
-OVERSOLD_THRESHOLD    = float(os.environ.get('OVERSOLD_THRESHOLD', 20.0))
-RECOVERY_K            = float(os.environ.get('RECOVERY_K', 50.0))
-MACRO_ENABLED         = os.environ.get('MACRO_ENABLED', 'true').lower() == 'true'
-MACRO_MA_PERIOD       = int(os.environ.get('MACRO_MA_PERIOD', 20))
-
-GRADE_S_THRESHOLD     = int(os.environ.get('GRADE_S_THRESHOLD', 80))
-GRADE_A_THRESHOLD     = int(os.environ.get('GRADE_A_THRESHOLD', 60))
-GRADE_B_THRESHOLD     = int(os.environ.get('GRADE_B_THRESHOLD', 40))
-
-WATCH_EXPIRY_DAYS     = int(os.environ.get('WATCH_EXPIRY_DAYS', 7))
-WATCH_EXPIRY_DAYS_B   = int(os.environ.get('WATCH_EXPIRY_DAYS_B', 5))
-WATCH_EXPIRY_DAYS_C   = int(os.environ.get('WATCH_EXPIRY_DAYS_C', 3))
-
-# 4h 과열 임계값
-H4_OVERHEAT_THRESHOLD = float(os.environ.get('H4_OVERHEAT_THRESHOLD', 80.0))
-H4_WARM_THRESHOLD     = float(os.environ.get('H4_WARM_THRESHOLD', 50.0))
-
-# DEEP Watch 상수
-DEEP_K_THRESHOLD      = float(os.environ.get('DEEP_K_THRESHOLD', 5.0))
-DEEP_BTC_DROP_MIN     = float(os.environ.get('DEEP_BTC_DROP_MIN', -2.0))
-DEEP_RELATIVE_MIN     = float(os.environ.get('DEEP_RELATIVE_MIN', 3.0))
-DEEP_GRADE_S          = int(os.environ.get('DEEP_GRADE_S', 80))
-DEEP_GRADE_A          = int(os.environ.get('DEEP_GRADE_A', 60))
-DEEP_GRADE_B          = int(os.environ.get('DEEP_GRADE_B', 40))
-
-# Stochastic RSI 프리셋
-_SHORT_PARAMS = (
-    int(os.environ.get('SHORT_RSI_PERIOD',   5)),
-    int(os.environ.get('SHORT_STOCH_PERIOD', 5)),
-    int(os.environ.get('SHORT_K_PERIOD',     3)),
-    int(os.environ.get('SHORT_D_PERIOD',     3)),
-)
-_MID_PARAMS = (
-    int(os.environ.get('MID_RSI_PERIOD',   10)),
-    int(os.environ.get('MID_STOCH_PERIOD', 10)),
-    int(os.environ.get('MID_K_PERIOD',      6)),
-    int(os.environ.get('MID_D_PERIOD',      6)),
-)
-_LONG_PARAMS = (
-    int(os.environ.get('LONG_RSI_PERIOD',   20)),
-    int(os.environ.get('LONG_STOCH_PERIOD', 20)),
-    int(os.environ.get('LONG_K_PERIOD',     12)),
-    int(os.environ.get('LONG_D_PERIOD',     12)),
-)
+OVERSOLD  = 20.0
+OVERBOUGHT = 80.0
 
 
-# ── 수학 헬퍼 ────────────────────────────────────────────────
-def _is_valid(v) -> bool:
-    """None / NaN / Inf 체크"""
-    if v is None:
-        return False
-    try:
-        f = float(v)
-        return not (math.isnan(f) or math.isinf(f))
-    except Exception:
-        return False
+# ── 핵심 계산 함수 ────────────────────────────────────────────
 
-
-def _safe_float(v, default=None):
-    if not _is_valid(v):
-        return default
-    return float(v)
-
-
-# ── SMA ──────────────────────────────────────────────────────
-def sma(data: list, period: int) -> list:
-    result = []
-    for i in range(len(data)):
-        if i < period - 1:
-            result.append(None)
-        else:
-            window = data[i - period + 1 : i + 1]
-            if any(v is None for v in window):
-                result.append(None)
-            else:
-                result.append(sum(window) / period)
-    return result
-
-
-# ── RSI ──────────────────────────────────────────────────────
-def calc_rsi(closes: list, period: int = 14) -> list:
+def _rsi(closes: np.ndarray, period: int) -> np.ndarray:
+    """RSI 계산"""
     if len(closes) < period + 1:
-        return [None] * len(closes)
+        return np.full(len(closes), np.nan)
+    deltas = np.diff(closes)
+    gains  = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
 
-    rsi_values = [None] * period
-    gains, losses = [], []
+    avg_gain = np.full(len(closes), np.nan)
+    avg_loss = np.full(len(closes), np.nan)
 
-    for i in range(1, period + 1):
-        diff = closes[i] - closes[i - 1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
-
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
-
-    if avg_loss == 0:
-        rsi_values.append(100.0)
-    else:
-        rs = avg_gain / avg_loss
-        rsi_values.append(100 - 100 / (1 + rs))
+    avg_gain[period] = np.mean(gains[:period])
+    avg_loss[period] = np.mean(losses[:period])
 
     for i in range(period + 1, len(closes)):
-        diff     = closes[i] - closes[i - 1]
-        gain     = max(diff, 0)
-        loss     = max(-diff, 0)
-        avg_gain = (avg_gain * (period - 1) + gain) / period
-        avg_loss = (avg_loss * (period - 1) + loss) / period
-        if avg_loss == 0:
-            rsi_values.append(100.0)
-        else:
-            rs = avg_gain / avg_loss
-            rsi_values.append(100 - 100 / (1 + rs))
+        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gains[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period - 1) + losses[i-1]) / period
 
-    return rsi_values
+    rs  = np.where(avg_loss == 0, np.inf, avg_gain / avg_loss)
+    rsi = np.where(avg_loss == 0, 100.0, 100.0 - 100.0 / (1.0 + rs))
+    rsi[:period] = np.nan
+    return rsi
 
 
-# ── Stochastic RSI ───────────────────────────────────────────
-def calc_stoch_rsi(closes: list,
-                   rsi_period:   int = 14,
-                   stoch_period: int = 14,
-                   k_period:     int = 3,
-                   d_period:     int = 3):
-    """
-    Returns: (k_value, d_value, k_series_smoothed)
-    k_series_smoothed 는 None 제거 후 순수 float 리스트
-    """
-    rsi_vals  = calc_rsi(closes, rsi_period)
-    valid_rsi = [v for v in rsi_vals if v is not None]
+def _stoch_rsi_k(rsi_arr: np.ndarray, stoch_period: int, k_smooth: int) -> np.ndarray:
+    """Stochastic RSI Raw K → Smoothed K 계산"""
+    n = len(rsi_arr)
+    raw_k = np.full(n, np.nan)
 
-    if len(valid_rsi) < stoch_period:
-        return None, None, []
-
-    stoch_k_raw = []
-    for i in range(len(rsi_vals)):
-        if rsi_vals[i] is None:
-            stoch_k_raw.append(None)
+    for i in range(stoch_period - 1, n):
+        window = rsi_arr[i - stoch_period + 1 : i + 1]
+        valid  = window[~np.isnan(window)]
+        if len(valid) < stoch_period:
             continue
-        window = [v for v in rsi_vals[max(0, i - stoch_period + 1) : i + 1]
-                  if v is not None]
-        if len(window) < stoch_period:
-            stoch_k_raw.append(None)
-            continue
-        lo, hi = min(window), max(window)
+        lo, hi = valid.min(), valid.max()
         if hi == lo:
-            stoch_k_raw.append(50.0)
+            raw_k[i] = 50.0
         else:
-            stoch_k_raw.append((rsi_vals[i] - lo) / (hi - lo) * 100)
+            raw_k[i] = (rsi_arr[i] - lo) / (hi - lo) * 100.0
 
     # K 스무딩 (SMA)
-    k_series_raw = sma(stoch_k_raw, k_period)
-    k_series     = [v for v in k_series_raw if v is not None]
+    k_smooth_arr = np.full(n, np.nan)
+    for i in range(k_smooth - 1, n):
+        window = raw_k[i - k_smooth + 1 : i + 1]
+        valid  = window[~np.isnan(window)]
+        if len(valid) == k_smooth:
+            k_smooth_arr[i] = valid.mean()
 
-    if not k_series:
-        return None, None, []
-
-    # D 스무딩 (SMA of K)
-    d_series_raw = sma(k_series_raw, d_period)
-    d_series     = [v for v in d_series_raw if v is not None]
-
-    k_val = k_series[-1]
-    d_val = d_series[-1] if d_series else None
-
-    return round(k_val, 2), (round(d_val, 2) if d_val is not None else None), k_series
+    return k_smooth_arr
 
 
-# ── 전체 프리셋 계산 ──────────────────────────────────────────
-def calc_all_presets(closes: list) -> dict:
-    """
-    Returns:
-        {
-          'short': {'k': float|None, 'd': float|None, 'k_series': list},
-          'mid':   {...},
-          'long':  {...}
-        }
-    """
-    result = {}
-    for label, params in [('short', _SHORT_PARAMS),
-                           ('mid',   _MID_PARAMS),
-                           ('long',  _LONG_PARAMS)]:
-        k, d, ks = calc_stoch_rsi(closes, *params)
-        result[label] = {'k': k, 'd': d, 'k_series': ks}
+def _sma(arr: np.ndarray, period: int) -> np.ndarray:
+    """단순 이동평균"""
+    result = np.full(len(arr), np.nan)
+    for i in range(period - 1, len(arr)):
+        window = arr[i - period + 1 : i + 1]
+        valid  = window[~np.isnan(window)]
+        if len(valid) == period:
+            result[i] = valid.mean()
     return result
 
 
-# ── 방향 분석 ────────────────────────────────────────────────
-def calc_direction(presets: dict) -> dict:
+def calc_stoch_rsi(closes: list, term: str) -> dict:
     """
+    단일 텀의 StochRSI K, D 계산
     Returns:
         {
-          'direction':    str,   # 상승 / 반등 / 횡보 / 하락
-          'strength':     int,   # 0~3
-          'golden_cross': bool
+          'k': float,        # 현재 K값
+          'd': float,        # 현재 D값
+          'k_prev': float,   # 이전 K값 (골든크로스 판단용)
+          'd_prev': float,   # 이전 D값
+          'golden_cross': bool,   # K가 D를 상향 돌파
+          'dead_cross':   bool,   # K가 D를 하향 돌파
+          'zone': str,       # 'oversold' / 'overbought' / 'neutral'
+          'signal': str,     # 'BUY_OK' / 'BUY_NO' / 'WATCH' / 'NEUTRAL'
         }
-
-    골든크로스 조건 (v4.2.2 수정):
-      - k_series 마지막 값(현재 K)이 D 위로 올라섰을 때
-      - 즉 k_series[-2] <= d AND k_series[-1] > d
     """
-    short = presets.get('short', {}) if presets else {}
-    mid   = presets.get('mid',   {}) if presets else {}
+    p = PARAMS[term]
+    closes_arr = np.array(closes, dtype=float)
 
-    k_s      = _safe_float(short.get('k'))
-    d_s      = _safe_float(short.get('d'))
-    k_m      = _safe_float(mid.get('k'))
-    k_series = short.get('k_series', [])
+    # 최소 데이터 길이 확인
+    min_len = p['rsi'] + p['stoch'] + p['k_smooth'] + p['d_smooth'] + 5
+    if len(closes_arr) < min_len:
+        return _empty_result()
 
-    # ── 골든크로스 판정 (핵심 수정) ─────────────────────────
-    golden_cross = False
-    if (k_s is not None
-            and d_s is not None
-            and len(k_series) >= 2):
-        prev_k = _safe_float(k_series[-2])
-        curr_k = _safe_float(k_series[-1])   # == k_s
-        if (prev_k is not None
-                and curr_k is not None
-                and prev_k <= d_s
-                and curr_k > d_s):
-            golden_cross = True
+    rsi_arr = _rsi(closes_arr, p['rsi'])
+    k_arr   = _stoch_rsi_k(rsi_arr, p['stoch'], p['k_smooth'])
+    d_arr   = _sma(k_arr, p['d_smooth'])
 
-    if k_s is None:
-        return {'direction': '횡보', 'strength': 0, 'golden_cross': False}
+    # 현재/이전 값 추출
+    k_vals = k_arr[~np.isnan(k_arr)]
+    d_vals = d_arr[~np.isnan(d_arr)]
 
-    # ── 방향 판정 ────────────────────────────────────────────
-    if k_s > 50 and (k_m is None or k_m > 30):
-        direction = '상승'
-        strength  = 3 if golden_cross else 2
-    elif k_s > 20:
-        direction = '반등'
-        strength  = 2 if golden_cross else 1
-    elif k_s <= 20:
-        direction = '하락'
-        strength  = 0
+    if len(k_vals) < 2 or len(d_vals) < 2:
+        return _empty_result()
+
+    k      = round(float(k_vals[-1]), 2)
+    k_prev = round(float(k_vals[-2]), 2)
+    d      = round(float(d_vals[-1]), 2)
+    d_prev = round(float(d_vals[-2]), 2)
+
+    # 골든크로스 / 데드크로스 판단
+    golden_cross = (k_prev <= d_prev) and (k > d)
+    dead_cross   = (k_prev >= d_prev) and (k < d)
+
+    # 구간 판단
+    if k <= OVERSOLD:
+        zone = 'oversold'
+    elif k >= OVERBOUGHT:
+        zone = 'overbought'
     else:
-        direction = '횡보'
-        strength  = 0
+        zone = 'neutral'
+
+    # 시그널 판단
+    signal = _get_signal(k, d, k_prev, d_prev, golden_cross, dead_cross, zone)
 
     return {
-        'direction':    direction,
-        'strength':     strength,
+        'k':            k,
+        'd':            d,
+        'k_prev':       k_prev,
+        'd_prev':       d_prev,
         'golden_cross': golden_cross,
+        'dead_cross':   dead_cross,
+        'zone':         zone,
+        'signal':       signal,
     }
 
 
-# ── 방향 아이콘 ──────────────────────────────────────────────
-def get_direction_icon(direction: str, golden_cross: bool = False) -> str:
-    """✨GX 포맷 통일 (v4.2.1~)"""
-    if golden_cross:
-        return '✨GX'
-    icon_map = {'상승': '↑', '반등': '↗', '횡보': '→', '하락': '↓'}
-    return icon_map.get(direction, '?')
-
-
-# ── Daily 게이트 ─────────────────────────────────────────────
-def evaluate_daily_gate(daily_presets: dict) -> bool:
-    """일봉 K ≤ OVERSOLD_THRESHOLD 이면 통과"""
-    if not daily_presets:
-        return False
-    k = _safe_float(daily_presets.get('short', {}).get('k'))
-    if k is None:
-        return False
-    return k <= OVERSOLD_THRESHOLD
-
-
-# ── 안전한 K 추출 ────────────────────────────────────────────
-def _safe_k(presets: dict, label: str = '') -> 'float | None':
-    if not presets:
-        return None
-    return _safe_float(presets.get('short', {}).get('k'))
-
-
-# ── 진입강도 계산 ────────────────────────────────────────────
-def calc_entry_strength(daily_dir:  dict,
-                        h4_dir:     dict,
-                        h1_dir:     dict,
-                        daily_k:    'float | None' = None,
-                        h4_k:       'float | None' = None) -> int:
+def _get_signal(k, d, k_prev, d_prev, golden_cross, dead_cross, zone) -> str:
     """
-    진입강도 레벨 (0~3):
-      0 → ⏳ 대기
-      1 → 👀 관찰
-      2 → 🎯 진입고려
-      3 → 🚀 강한신호
-
-    규칙 (v4.2.2):
-      1) 기본: daily/h4/h1 strength 합산 → 레벨 결정
-      2) 4hK > 80 → 1단계 강제 하향
-      3) 일봉K ≤ 2 + 상승/반등 → 최소 레벨 2(🎯)
-      4) 일봉K ≤ 2 + 횡보/하락 → 최소 레벨 1(👀)  ← v4.2.2 신규
+    시그널 판단 로직
+    - BUY_OK : 과매도 구간에서 K가 D 상향 돌파 (바닥 반등 시작)
+    - BUY_NO : 과매수 구간에서 K가 D 하향 돌파 (하락 중)
+    - WATCH  : 과매도 구간이지만 아직 골든크로스 미발생
+    - NEUTRAL: 그 외
     """
-    if daily_dir is None: daily_dir = {}
-    if h4_dir    is None: h4_dir    = {}
-    if h1_dir    is None: h1_dir    = {}
+    # 절대 NO: 과매수 + 데드크로스
+    if zone == 'overbought' and dead_cross:
+        return 'BUY_NO'
+    if zone == 'overbought' and k < d:
+        return 'BUY_NO'
 
-    d_str  = int(daily_dir.get('strength', 0) or 0)
-    h_str  = int(h4_dir.get('strength',   0) or 0)
-    h1_str = int(h1_dir.get('strength',   0) or 0)
+    # 최적 진입: 과매도 + 골든크로스
+    if zone == 'oversold' and golden_cross:
+        return 'BUY_OK'
 
-    total = d_str + h_str + h1_str   # max 9
+    # 과매도 대기: 골든크로스 미발생
+    if zone == 'oversold' and k <= d:
+        return 'WATCH'
 
-    if   total >= 7: level = 3
-    elif total >= 4: level = 2
-    elif total >= 2: level = 1
-    else:            level = 0
+    # 과매도 상승 중 (골든크로스 이후 K가 20 돌파)
+    if k > OVERSOLD and k_prev <= OVERSOLD and k > d:
+        return 'BUY_OK'
 
-    # ── 4hK 과열 → 1단계 하향 ────────────────────────────
-    h4k = _safe_float(h4_k)
-    if h4k is not None and h4k > H4_OVERHEAT_THRESHOLD:
-        level = max(0, level - 1)
-
-    # ── 일봉K 극단 과매도 최소 레벨 보장 ─────────────────
-    dk              = _safe_float(daily_k)
-    daily_direction = daily_dir.get('direction', '횡보')
-
-    if dk is not None and dk <= 2.0:
-        if daily_direction in ('상승', '반등'):
-            level = max(level, 2)   # 최소 🎯진입고려
-        else:
-            level = max(level, 1)   # 최소 👀관찰 (횡보/하락 포함)
-
-    return level
+    return 'NEUTRAL'
 
 
-def entry_strength_label(level: int) -> str:
-    return {3: '🚀강한신호', 2: '🎯진입고려', 1: '👀관찰', 0: '⏳대기'}.get(level, '⏳대기')
+def _empty_result() -> dict:
+    return {
+        'k': None, 'd': None,
+        'k_prev': None, 'd_prev': None,
+        'golden_cross': False, 'dead_cross': False,
+        'zone': 'unknown', 'signal': 'NEUTRAL',
+    }
 
 
-# ── Watch 만료일 ─────────────────────────────────────────────
-def get_expiry_days(grade: str) -> int:
-    if grade == 'C': return WATCH_EXPIRY_DAYS_C
-    if grade == 'B': return WATCH_EXPIRY_DAYS_B
-    return WATCH_EXPIRY_DAYS   # A/S → 7일
+# ── 멀티 타임프레임 통합 분석 ─────────────────────────────────
 
-
-# ── Watch 점수 계산 ──────────────────────────────────────────
-def calc_watch_score(daily_presets: dict,
-                     h4_presets:    dict,
-                     h1_presets:    dict,
-                     vol_ratio:     float = 1.0,
-                     snap_k:        'float | None' = None) -> dict:
+def analyze_mtf(candles: dict) -> dict:
     """
-    최대 100점:
-      일봉 위치      15점
-      일봉 방향      15점
-      4h  위치       20점
-      4h  방향       20점
-      1h  위치       10점
-      1h  방향       10점
-      거래량 보너스   5점
-      하락 보너스     5점
-    패널티:
-      4hK > 80  → -10점
-      4hK > 50  →  -5점
+    candles = {
+        'daily': [close, close, ...],   # 최소 100개 권장
+        'h4':    [close, close, ...],   # 최소 100개 권장
+        'h1':    [close, close, ...],   # 최소 100개 권장
+    }
+    Returns full MTF analysis result.
     """
-    score     = 0
-    breakdown = {}
+    result = {}
+    for tf in ('daily', 'h4', 'h1'):
+        closes = candles.get(tf, [])
+        result[tf] = {}
+        for term in ('short', 'mid', 'long'):
+            result[tf][term] = calc_stoch_rsi(closes, term)
 
-    # ── 일봉 위치 (15점) ─────────────────────────────────────
-    dk = _safe_k(daily_presets, 'daily')
-    if dk is not None:
-        if   dk <= 5:  pos_score = 15
-        elif dk <= 10: pos_score = 12
-        elif dk <= 15: pos_score = 8
-        elif dk <= 20: pos_score = 5
-        else:          pos_score = 0
+    # 종합 판단
+    result['summary'] = _summarize(result)
+    return result
+
+
+def _summarize(mtf: dict) -> dict:
+    """
+    종합 시그널 및 등급 산출
+    등급 기준:
+      S: 일봉 장기+중기+단기 과매도 + 4h/1h 단기 골든크로스
+      A: 일봉 장기+단기 과매도 + 4h 단기 골든크로스
+      B: 일봉 장기 과매도 + (4h 또는 1h) 단기 골든크로스
+      C: 일봉 장기 과매도만
+      -: 조건 미충족
+    """
+    daily = mtf.get('daily', {})
+    h4    = mtf.get('h4', {})
+    h1    = mtf.get('h1', {})
+
+    d_long  = daily.get('long',  _empty_result())
+    d_mid   = daily.get('mid',   _empty_result())
+    d_short = daily.get('short', _empty_result())
+    h4_short = h4.get('short',  _empty_result())
+    h1_short = h1.get('short',  _empty_result())
+
+    # 진입 차단 조건
+    any_buy_no = any([
+        d_long.get('signal')  == 'BUY_NO',
+        d_short.get('signal') == 'BUY_NO',
+        h4_short.get('signal') == 'BUY_NO',
+        h1_short.get('signal') == 'BUY_NO',
+    ])
+
+    # 과매도 여부
+    d_long_os  = d_long.get('zone')  == 'oversold'
+    d_mid_os   = d_mid.get('zone')   == 'oversold'
+    d_short_os = d_short.get('zone') == 'oversold'
+
+    # 골든크로스 여부
+    h4_gc  = h4_short.get('golden_cross', False) or h4_short.get('signal') == 'BUY_OK'
+    h1_gc  = h1_short.get('golden_cross', False) or h1_short.get('signal') == 'BUY_OK'
+    d_gc   = d_short.get('golden_cross', False)  or d_short.get('signal')  == 'BUY_OK'
+
+    # Watch 등록 조건: 일봉 장기 과매도
+    watch_eligible = d_long_os
+
+    # 등급 산출
+    if any_buy_no:
+        grade = 'X'   # 진입 금지
+    elif d_long_os and d_mid_os and d_short_os and h4_gc and h1_gc:
+        grade = 'S'
+    elif d_long_os and d_short_os and h4_gc:
+        grade = 'A'
+    elif d_long_os and (h4_gc or h1_gc):
+        grade = 'B'
+    elif d_long_os:
+        grade = 'C'
     else:
-        pos_score = 0
-    score += pos_score
-    breakdown['daily_position'] = pos_score
+        grade = '-'
 
-    # ── 일봉 방향 (15점) ─────────────────────────────────────
-    daily_dir_info = calc_direction(daily_presets) if daily_presets else {}
-    daily_dir      = daily_dir_info.get('direction', '횡보')
-    daily_gx       = daily_dir_info.get('golden_cross', False)
-
-    if   daily_dir == '상승': dir_score = 15
-    elif daily_dir == '반등': dir_score = 10
-    elif daily_dir == '횡보': dir_score = 3
-    else:                     dir_score = 0
-    if daily_gx:
-        dir_score = min(15, dir_score + 3)
-    score += dir_score
-    breakdown['daily_direction'] = dir_score
-
-    # ── 4h 위치 (20점) ───────────────────────────────────────
-    h4k = _safe_k(h4_presets, 'h4')
-    if h4k is not None:
-        if   h4k <= 5:  h4_pos = 20
-        elif h4k <= 10: h4_pos = 16
-        elif h4k <= 20: h4_pos = 12
-        elif h4k <= 50: h4_pos = 6
-        else:           h4_pos = 0
-    else:
-        h4_pos = 0
-    score += h4_pos
-    breakdown['h4_position'] = h4_pos
-
-    # ── 4h 방향 (20점) ───────────────────────────────────────
-    h4_dir_info = calc_direction(h4_presets) if h4_presets else {}
-    h4_dir      = h4_dir_info.get('direction', '횡보')
-    h4_gx       = h4_dir_info.get('golden_cross', False)
-
-    if   h4_dir == '상승': h4_dir_score = 20
-    elif h4_dir == '반등': h4_dir_score = 13
-    elif h4_dir == '횡보': h4_dir_score = 4
-    else:                  h4_dir_score = 0
-    if h4_gx:
-        h4_dir_score = min(20, h4_dir_score + 4)
-    score += h4_dir_score
-    breakdown['h4_direction'] = h4_dir_score
-
-    # ── 1h 위치 (10점) ───────────────────────────────────────
-    h1k = _safe_k(h1_presets, 'h1')
-    if h1k is not None:
-        if   h1k <= 10: h1_pos = 10
-        elif h1k <= 20: h1_pos = 7
-        elif h1k <= 50: h1_pos = 3
-        else:           h1_pos = 0
-    else:
-        h1_pos = 0
-    score += h1_pos
-    breakdown['h1_position'] = h1_pos
-
-    # ── 1h 방향 (10점) ───────────────────────────────────────
-    h1_dir_info = calc_direction(h1_presets) if h1_presets else {}
-    h1_dir      = h1_dir_info.get('direction', '횡보')
-    h1_gx       = h1_dir_info.get('golden_cross', False)
-
-    if   h1_dir == '상승': h1_dir_score = 10
-    elif h1_dir == '반등': h1_dir_score = 6
-    elif h1_dir == '횡보': h1_dir_score = 2
-    else:                  h1_dir_score = 0
-    if h1_gx:
-        h1_dir_score = min(10, h1_dir_score + 2)
-    score += h1_dir_score
-    breakdown['h1_direction'] = h1_dir_score
-
-    # ── 거래량 보너스 (5점) ──────────────────────────────────
-    vol = _safe_float(vol_ratio, 1.0)
-    if   vol >= 3.0: vol_bonus = 5
-    elif vol >= 2.0: vol_bonus = 3
-    elif vol >= 1.5: vol_bonus = 1
-    else:            vol_bonus = 0
-    score += vol_bonus
-    breakdown['volume_bonus'] = vol_bonus
-
-    # ── 하락 보너스 (5점) ────────────────────────────────────
-    drop_bonus = 0
-    if snap_k is not None and dk is not None:
-        drop = snap_k - dk
-        if   drop >= 20: drop_bonus = 5
-        elif drop >= 10: drop_bonus = 3
-        elif drop >= 5:  drop_bonus = 1
-    score += drop_bonus
-    breakdown['drop_bonus'] = drop_bonus
-
-    # ── 4hK 과열 패널티 ──────────────────────────────────────
-    penalty = 0
-    if h4k is not None:
-        if   h4k > H4_OVERHEAT_THRESHOLD: penalty = -10
-        elif h4k > H4_WARM_THRESHOLD:     penalty = -5
-    score += penalty
-    breakdown['h4_penalty'] = penalty
-
-    # ── 최종 등급 ────────────────────────────────────────────
-    score = max(0, min(100, score))
-    if   score >= GRADE_S_THRESHOLD: grade = 'S'
-    elif score >= GRADE_A_THRESHOLD: grade = 'A'
-    elif score >= GRADE_B_THRESHOLD: grade = 'B'
-    else:                            grade = 'C'
-
-    # ── 진입강도 ─────────────────────────────────────────────
-    entry_level = calc_entry_strength(
-        daily_dir_info, h4_dir_info, h1_dir_info,
-        daily_k=dk, h4_k=h4k,
+    # 자동 진입 가능 여부
+    auto_entry = (
+        not any_buy_no and
+        d_long_os and
+        (h4_gc or h1_gc) and
+        grade in ('S', 'A', 'B')
     )
 
+    # 진입 강도 점수 (0~100)
+    score = _calc_score(d_long, d_mid, d_short, h4_short, h1_short)
+
     return {
-        'score':          score,
         'grade':          grade,
-        'breakdown':      breakdown,
-        'daily_dir':      daily_dir,
-        'h4_dir':         h4_dir,
-        'h1_dir':         h1_dir,
-        'daily_dir_info': daily_dir_info,
-        'h4_dir_info':    h4_dir_info,
-        'h1_dir_info':    h1_dir_info,
-        'daily_k':        dk,
-        'h4_k':           h4k,
-        'h1_k':           h1k,
-        'entry_level':    entry_level,
-        'entry_label':    entry_strength_label(entry_level),
+        'watch_eligible': watch_eligible,
+        'auto_entry':     auto_entry,
+        'any_buy_no':     any_buy_no,
+        'score':          score,
+        'd_long_os':      d_long_os,
+        'd_mid_os':       d_mid_os,
+        'd_short_os':     d_short_os,
+        'h4_gc':          h4_gc,
+        'h1_gc':          h1_gc,
+        'd_gc':           d_gc,
     }
 
 
-# ── DEEP Watch 점수 ──────────────────────────────────────────
-def calc_deep_score(daily_k:        float,
-                    btc_change:     float,
-                    coin_change:    float,
-                    days_at_bottom: int   = 0,
-                    vol_ratio:      float = 1.0,
-                    weekly_k:       'float | None' = None) -> dict:
+def _calc_score(d_long, d_mid, d_short, h4_short, h1_short) -> int:
+    """진입 강도 점수 산출 (0~100)"""
+    score = 0
+
+    # 일봉 장기 과매도 (핵심, 30점)
+    if d_long.get('zone') == 'oversold':
+        k = d_long.get('k') or 50
+        score += 30
+        if k <= 10:
+            score += 10   # 극단 과매도 보너스
+
+    # 일봉 중기 과매도 (15점)
+    if d_mid.get('zone') == 'oversold':
+        score += 15
+
+    # 일봉 단기 과매도 (10점)
+    if d_short.get('zone') == 'oversold':
+        score += 10
+
+    # 4h 골든크로스 (20점)
+    if h4_short.get('signal') in ('BUY_OK',):
+        score += 20
+    elif h4_short.get('zone') == 'oversold':
+        score += 8
+
+    # 1h 골든크로스 (15점)
+    if h1_short.get('signal') in ('BUY_OK',):
+        score += 15
+    elif h1_short.get('zone') == 'oversold':
+        score += 5
+
+    # 진입 차단 패널티
+    if d_long.get('signal') == 'BUY_NO':
+        score = max(0, score - 40)
+    if h4_short.get('signal') == 'BUY_NO':
+        score = max(0, score - 20)
+
+    return min(score, 100)
+
+
+# ── BTC MA20 필터 ─────────────────────────────────────────────
+
+def btc_ma20_signal(btc_closes: list) -> dict:
     """
-    DEEP Watch 전용 점수 (최대 100점)
-      K값 위치       30점
-      상대 강도      30점
-      바닥 유지      20점
-      거래량 소진    10점
-      주봉 K 보너스  10점
+    BTC 가격이 MA20 대비 위/아래 여부 판단
+    Returns:
+        { 'price': float, 'ma20': float, 'above': bool, 'pct': float }
     """
-    score     = 0
-    breakdown = {}
+    if len(btc_closes) < 20:
+        return {'price': None, 'ma20': None, 'above': None, 'pct': 0.0}
 
-    # K값 위치 (30점)
-    if   daily_k <= 0: k_score = 30
-    elif daily_k <= 1: k_score = 28
-    elif daily_k <= 2: k_score = 25
-    elif daily_k <= 3: k_score = 20
-    elif daily_k <= 5: k_score = 15
-    else:              k_score = 0
-    score += k_score
-    breakdown['k_position'] = k_score
+    arr   = np.array(btc_closes[-20:], dtype=float)
+    ma20  = float(arr.mean())
+    price = float(btc_closes[-1])
+    pct   = round((price - ma20) / ma20 * 100, 2)
 
-    # 상대 강도 (30점)
-    relative = coin_change - btc_change
-    if   relative >= 6:              rel_score = 30
-    elif relative >= DEEP_RELATIVE_MIN: rel_score = 20
-    elif relative >= 1:              rel_score = 10
-    else:                            rel_score = 0
-    score += rel_score
-    breakdown['relative_strength'] = rel_score
-    breakdown['relative_value']    = round(relative, 2)
+    return {
+        'price': price,
+        'ma20':  round(ma20, 2),
+        'above': price > ma20,
+        'pct':   pct,
+    }
 
-    # 바닥 유지 (20점)
-    if   days_at_bottom >= 5: bottom_score = 20
-    elif days_at_bottom >= 3: bottom_score = 15
-    elif days_at_bottom >= 2: bottom_score = 10
-    elif days_at_bottom >= 1: bottom_score = 5
-    else:                     bottom_score = 0
-    score += bottom_score
-    breakdown['days_at_bottom'] = bottom_score
 
-    # 거래량 소진 (10점) — 낮을수록 좋음
-    vol = _safe_float(vol_ratio, 1.0)
-    if   vol <= 0.3: vol_score = 10
-    elif vol <= 0.5: vol_score = 7
-    elif vol <= 0.8: vol_score = 3
-    else:            vol_score = 0
-    score += vol_score
-    breakdown['volume_exhaustion'] = vol_score
+# ── DEEP 상대강도 계산 ────────────────────────────────────────
 
-    # 주봉 K 보너스 (10점)
-    wk = _safe_float(weekly_k)
-    if wk is not None:
-        if   wk <= 10: wk_bonus = 10
-        elif wk <= 20: wk_bonus = 7
-        elif wk <= 30: wk_bonus = 3
-        else:          wk_bonus = 0
+def calc_relative_strength(coin_pct: float, btc_pct: float) -> dict:
+    """
+    BTC 대비 상대강도 계산
+    coin_pct, btc_pct: 변화율(%) 예) -2.5, -5.0
+    Returns:
+        { 'rs': float, 'grade': str, 'signal': str }
+    """
+    rs = round(coin_pct - btc_pct, 2)
+
+    if rs >= 5.0:
+        grade, signal = 'S', 'DEEP_STRONG'
+    elif rs >= 3.0:
+        grade, signal = 'A', 'DEEP_GOOD'
+    elif rs >= 2.0:
+        grade, signal = 'B', 'DEEP_WATCH'
+    elif rs >= 1.0:
+        grade, signal = 'C', 'DEEP_MONITOR'
     else:
-        wk_bonus = 0
-    score += wk_bonus
-    breakdown['weekly_k_bonus'] = wk_bonus
+        grade, signal = '-', 'NEUTRAL'
 
-    score = max(0, min(100, score))
-    return {'deep_score': score, 'breakdown': breakdown}
-
-
-def get_deep_grade(deep_score: int) -> str:
-    if   deep_score >= DEEP_GRADE_S: return 'DEEP-S'
-    elif deep_score >= DEEP_GRADE_A: return 'DEEP-A'
-    elif deep_score >= DEEP_GRADE_B: return 'DEEP-B'
-    return 'DEEP-C'
-
-
-def evaluate_deep_condition(daily_k:     float,
-                             btc_change:  float,
-                             coin_change: float) -> bool:
-    """
-    DEEP Watch 기본 조건 (AND):
-      1) 일봉 K ≤ DEEP_K_THRESHOLD  (기본 5.0)
-      2) BTC 24h 변동 ≤ DEEP_BTC_DROP_MIN  (기본 -2.0%)
-      3) 코인 24h 변동 > BTC + DEEP_RELATIVE_MIN  (기본 +3.0%p)
-    """
-    if daily_k    >  DEEP_K_THRESHOLD:                    return False
-    if btc_change >  DEEP_BTC_DROP_MIN:                   return False
-    if coin_change <= btc_change + DEEP_RELATIVE_MIN:     return False
-    return True
-
-
-# ── 매크로 필터 ──────────────────────────────────────────────
-def evaluate_macro_filter(btc_closes: list) -> dict:
-    """BTC 주간 MA20 필터 (5% 여유 허용)"""
-    if not MACRO_ENABLED or len(btc_closes) < MACRO_MA_PERIOD:
-        return {'pass': True, 'btc_weekly_ma20': None, 'btc_current': None}
-
-    ma_series = sma(btc_closes, MACRO_MA_PERIOD)
-    ma20      = ma_series[-1]
-    current   = btc_closes[-1]
-
-    if ma20 is None:
-        return {'pass': True, 'btc_weekly_ma20': None, 'btc_current': current}
-
-    return {
-        'pass':            current >= ma20 * 0.95,
-        'btc_weekly_ma20': round(ma20, 0),
-        'btc_current':     round(current, 0),
-    }
-
-
-# ── 모듈 설정 정보 ───────────────────────────────────────────
-def get_module_config() -> dict:
-    return {
-        'version':           VERSION,
-        'oversold_threshold': OVERSOLD_THRESHOLD,
-        'recovery_k':        RECOVERY_K,
-        'macro_enabled':     MACRO_ENABLED,
-        'macro_ma_period':   MACRO_MA_PERIOD,
-        'grade_thresholds':  {
-            'S': GRADE_S_THRESHOLD,
-            'A': GRADE_A_THRESHOLD,
-            'B': GRADE_B_THRESHOLD,
-        },
-        'watch_expiry_days': {
-            'default': WATCH_EXPIRY_DAYS,
-            'B':       WATCH_EXPIRY_DAYS_B,
-            'C':       WATCH_EXPIRY_DAYS_C,
-        },
-        'h4_overheat': {
-            'overheat': H4_OVERHEAT_THRESHOLD,
-            'warm':     H4_WARM_THRESHOLD,
-        },
-        'deep_thresholds': {
-            'k':        DEEP_K_THRESHOLD,
-            'btc_drop': DEEP_BTC_DROP_MIN,
-            'relative': DEEP_RELATIVE_MIN,
-        },
-        'presets': {
-            'short': _SHORT_PARAMS,
-            'mid':   _MID_PARAMS,
-            'long':  _LONG_PARAMS,
-        },
-    }
+    return {'rs': rs, 'grade': grade, 'signal': signal}
