@@ -7,6 +7,7 @@ scanner.py v3.0.2
 """
 
 import os
+import json
 import time
 import logging
 import threading
@@ -16,20 +17,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import requests
 
-import mtf_setup
+import mtf_setup as _mtf                  # ← 하나로 통합
+from mtf_setup import VERSION as MTF_VERSION
 
 VERSION = 'v3.0.2'
-import mtf_setup as _mtf
-MTF_VERSION = _mtf.VERSION
 
-# ── 로깅 ──────────────────────────────────────────────────────
+# ── 로깅 ──────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
 )
 log = logging.getLogger(__name__)
 
-# ── 환경변수 ──────────────────────────────────────────────────
+# ── 환경변수 ──────────────────────────────────────────────────────
 TELEGRAM_TOKEN       = os.environ.get('TELEGRAM_TOKEN', '')
 TELEGRAM_CHAT_ID     = os.environ.get('TELEGRAM_CHAT_ID', '')
 
@@ -60,7 +60,7 @@ STABLE_COINS = {
     'STETH','WBTC','CBBTC',
 }
 
-# ── 파일 경로 ─────────────────────────────────────────────────
+# ── 파일 경로 ─────────────────────────────────────────────────────
 BASE_DIR     = os.environ.get('DATA_DIR', '/app/data')
 WATCH_FILE   = os.path.join(BASE_DIR, 'watch_list.json')
 ACTIVE_FILE  = os.path.join(BASE_DIR, 'active_list.json')
@@ -71,11 +71,11 @@ EVENT_FILE   = os.path.join(BASE_DIR, 'events.json')
 
 os.makedirs(BASE_DIR, exist_ok=True)
 
-# ── 전역 상태 ─────────────────────────────────────────────────
+# ── 전역 상태 ─────────────────────────────────────────────────────
 _state_lock    = threading.Lock()
 _scanner_state = {
     'version':          VERSION,
-    'mtf_version':      mtf_setup.VERSION,
+    'mtf_version':      MTF_VERSION,
 
     'running':            False,
     'watch_rescanning':   False,
@@ -115,9 +115,7 @@ _scanner_state = {
     'error': None,
 }
 
-# ── JSON 유틸 ─────────────────────────────────────────────────
-import json
-
+# ── JSON 유틸 ─────────────────────────────────────────────────────
 def _load_json(path: str, default):
     try:
         if os.path.exists(path):
@@ -149,9 +147,9 @@ def load_events():       return _load_json(EVENT_FILE,   [])
 def save_state():
     _save_json(STATE_FILE, _scanner_state)
 
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 # 이벤트 로그
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 
 _event_lock = threading.Lock()
 
@@ -169,9 +167,9 @@ def add_event(emoji: str, msg: str):
         _save_json(EVENT_FILE, events)
     log.info(f'{emoji} {msg}')
 
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 # Upbit API
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 
 def _upbit_get(url: str, params: dict = None, retries: int = 3):
     for attempt in range(retries):
@@ -240,15 +238,15 @@ def get_btc_info() -> dict:
     usdt_rate      = get_usdt_rate()
     time.sleep(REQUEST_DELAY)
 
-    closes_daily   = get_candles('KRW-BTC', 'days',  count=30)
+    closes_daily   = get_candles('KRW-BTC', 'days',        count=30)
     time.sleep(REQUEST_DELAY)
-    closes_weekly  = get_candles('KRW-BTC', 'weeks', count=25)
+    closes_weekly  = get_candles('KRW-BTC', 'weeks',       count=25)
     time.sleep(REQUEST_DELAY)
     closes_h4      = get_candles('KRW-BTC', 'minutes/240', count=10)
     time.sleep(REQUEST_DELAY)
     closes_h1      = get_candles('KRW-BTC', 'minutes/60',  count=5)
 
-    ma20_info = mtf_setup.btc_ma20_signal(closes_daily, closes_weekly)
+    ma20_info = _mtf.btc_ma20_signal(closes_daily, closes_weekly)
 
     price  = ma20_info.get('price')
     pct_4h = None
@@ -265,19 +263,19 @@ def get_btc_info() -> dict:
         return None
 
     return {
-        'price':             price,
-        'price_usd':         to_usd(price),
-        'usdt_rate':         usdt_rate,
-        'daily_ma20':        ma20_info.get('daily_ma20'),
-        'daily_ma20_usd':    to_usd(ma20_info.get('daily_ma20')),
-        'daily_above':       ma20_info.get('daily_above'),
-        'daily_pct':         ma20_info.get('daily_pct'),
-        'weekly_ma20':       ma20_info.get('weekly_ma20'),
-        'weekly_ma20_usd':   to_usd(ma20_info.get('weekly_ma20')),
-        'weekly_above':      ma20_info.get('weekly_above'),
-        'weekly_pct':        ma20_info.get('weekly_pct'),
-        'pct_1h':            pct_1h,
-        'pct_4h':            pct_4h,
+        'price':              price,
+        'price_usd':          to_usd(price),
+        'usdt_rate':          usdt_rate,
+        'daily_ma20':         ma20_info.get('daily_ma20'),
+        'daily_ma20_usd':     to_usd(ma20_info.get('daily_ma20')),
+        'daily_above':        ma20_info.get('daily_above'),
+        'daily_pct':          ma20_info.get('daily_pct'),
+        'weekly_ma20':        ma20_info.get('weekly_ma20'),
+        'weekly_ma20_usd':    to_usd(ma20_info.get('weekly_ma20')),
+        'weekly_above':       ma20_info.get('weekly_above'),
+        'weekly_pct':         ma20_info.get('weekly_pct'),
+        'pct_1h':             pct_1h,
+        'pct_4h':             pct_4h,
     }
 
 def get_price_change_pct(market: str, unit: str, periods: int = 1):
@@ -288,9 +286,9 @@ def get_price_change_pct(market: str, unit: str, periods: int = 1):
     new = candles[-1]
     return round((new - old) / old * 100, 2) if old != 0 else None
 
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 # Telegram
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 
 def send_telegram(msg: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -342,9 +340,9 @@ def _fmt_deep_msg(items: list, btc_pct: str) -> str:
         )
     return '\n'.join(lines) + f'\n⏰ {datetime.now().strftime("%m/%d %H:%M")}'
 
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 # 코인 분석
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 
 def analyze_ticker(market: str):
     try:
@@ -358,7 +356,7 @@ def analyze_ticker(market: str):
         if len(daily) < 60 or len(h4) < 60 or len(h1) < 60:
             return None
 
-        mtf     = mtf_setup.analyze_mtf({'daily': daily, 'h4': h4, 'h1': h1})
+        mtf     = _mtf.analyze_mtf({'daily': daily, 'h4': h4, 'h1': h1})
         summary = mtf['summary']
 
         vol_ratio   = get_volume_ratio(market)
@@ -371,14 +369,14 @@ def analyze_ticker(market: str):
             'ticker':   market.replace('KRW-', ''),
             'price':    daily[-1] if daily else None,
 
-            'daily_long_k':      mtf['daily']['long'].get('k'),
-            'daily_long_d':      mtf['daily']['long'].get('d'),
-            'daily_mid_k':       mtf['daily']['mid'].get('k'),
-            'daily_mid_d':       mtf['daily']['mid'].get('d'),
-            'daily_short_k':     mtf['daily']['short'].get('k'),
-            'daily_short_d':     mtf['daily']['short'].get('d'),
-            'daily_long_signal': mtf['daily']['long'].get('signal'),
-            'daily_short_signal':mtf['daily']['short'].get('signal'),
+            'daily_long_k':       mtf['daily']['long'].get('k'),
+            'daily_long_d':       mtf['daily']['long'].get('d'),
+            'daily_mid_k':        mtf['daily']['mid'].get('k'),
+            'daily_mid_d':        mtf['daily']['mid'].get('d'),
+            'daily_short_k':      mtf['daily']['short'].get('k'),
+            'daily_short_d':      mtf['daily']['short'].get('d'),
+            'daily_long_signal':  mtf['daily']['long'].get('signal'),
+            'daily_short_signal': mtf['daily']['short'].get('signal'),
 
             'h4_short_k':      mtf['h4']['short'].get('k'),
             'h4_short_d':      mtf['h4']['short'].get('d'),
@@ -399,7 +397,7 @@ def analyze_ticker(market: str):
             'vol_ratio':   vol_ratio,
             'bottom_days': bottom_days,
 
-            # ── v3.0.2: 사이클 정보 추가 ──────────────────────
+            # v3.0.2: 사이클 정보
             'd_short_cycle': mtf['daily']['short'].get('cycle', 'RISING'),
             'd_mid_cycle':   mtf['daily']['mid'].get('cycle',   'RISING'),
             'h4_cycle':      mtf['h4']['short'].get('cycle',    'RISING'),
@@ -418,16 +416,16 @@ def _count_bottom_days(closes: list, term: str) -> int:
         return 0
     count = 0
     for i in range(len(closes) - 1, max(len(closes) - 15, -1), -1):
-        r = mtf_setup.calc_stoch_rsi(closes[:i+1], term)
+        r = _mtf.calc_stoch_rsi(closes[:i+1], term)
         if r.get('k') is not None and r['k'] <= 20:
             count += 1
         else:
             break
     return count
 
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 # Watch / Active 빌더
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 
 def _make_watch_item(res: dict) -> dict:
     now       = datetime.now().isoformat()
@@ -549,9 +547,9 @@ def close_active_item(item: dict, reason: str, close_price: float) -> dict:
         )
     return closed
 
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 # DEEP 스캔
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 
 def run_deep_scan(btc_info: dict):
     with _state_lock:
@@ -568,12 +566,12 @@ def run_deep_scan(btc_info: dict):
             coin_pct = get_price_change_pct(market, 'minutes/60', 1)
             if coin_pct is None:
                 return None
-            rs_info = mtf_setup.calc_relative_strength(coin_pct, btc_pct)
+            rs_info = _mtf.calc_relative_strength(coin_pct, btc_pct)
             if rs_info['grade'] == '-':
                 return None
             daily = get_candles(market, 'days', count=30)
             if daily:
-                r = mtf_setup.calc_stoch_rsi(daily, 'long')
+                r = _mtf.calc_stoch_rsi(daily, 'long')
                 if r.get('k') is not None and r['k'] >= 70:
                     return None
             time.sleep(REQUEST_DELAY)
@@ -616,9 +614,9 @@ def run_deep_scan(btc_info: dict):
         with _state_lock:
             _scanner_state['deep_scanning'] = False
 
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 # 수동 관리 API
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 
 def manual_add_watch(ticker: str) -> dict:
     ticker  = ticker.upper().replace('KRW-', '')
@@ -706,9 +704,9 @@ def reset_watch_list() -> dict:
     add_event('🔄', 'Watch 목록 초기화')
     return {'success': True, 'message': 'Watch 목록 초기화 완료'}
 
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 # 스캔 루틴
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 
 def _run_full_scan():
     with _state_lock:
@@ -726,19 +724,19 @@ def _run_full_scan():
 
         btc = get_btc_info()
         with _state_lock:
-            _scanner_state['btc_price']           = btc.get('price')
-            _scanner_state['btc_price_usd']       = btc.get('price_usd')
-            _scanner_state['usdt_rate']            = btc.get('usdt_rate')
-            _scanner_state['btc_daily_ma20']       = btc.get('daily_ma20')
-            _scanner_state['btc_daily_ma20_usd']   = btc.get('daily_ma20_usd')
-            _scanner_state['btc_daily_above']      = btc.get('daily_above')
-            _scanner_state['btc_daily_pct']        = btc.get('daily_pct')
-            _scanner_state['btc_weekly_ma20']      = btc.get('weekly_ma20')
-            _scanner_state['btc_weekly_ma20_usd']  = btc.get('weekly_ma20_usd')
-            _scanner_state['btc_weekly_above']     = btc.get('weekly_above')
-            _scanner_state['btc_weekly_pct']       = btc.get('weekly_pct')
-            _scanner_state['btc_1h_pct']           = btc.get('pct_1h')
-            _scanner_state['btc_4h_pct']           = btc.get('pct_4h')
+            _scanner_state['btc_price']            = btc.get('price')
+            _scanner_state['btc_price_usd']        = btc.get('price_usd')
+            _scanner_state['usdt_rate']             = btc.get('usdt_rate')
+            _scanner_state['btc_daily_ma20']        = btc.get('daily_ma20')
+            _scanner_state['btc_daily_ma20_usd']    = btc.get('daily_ma20_usd')
+            _scanner_state['btc_daily_above']       = btc.get('daily_above')
+            _scanner_state['btc_daily_pct']         = btc.get('daily_pct')
+            _scanner_state['btc_weekly_ma20']       = btc.get('weekly_ma20')
+            _scanner_state['btc_weekly_ma20_usd']   = btc.get('weekly_ma20_usd')
+            _scanner_state['btc_weekly_above']      = btc.get('weekly_above')
+            _scanner_state['btc_weekly_pct']        = btc.get('weekly_pct')
+            _scanner_state['btc_1h_pct']            = btc.get('pct_1h')
+            _scanner_state['btc_4h_pct']            = btc.get('pct_4h')
 
         watches        = load_watch_list()
         actives        = load_active_list()
@@ -760,8 +758,10 @@ def _run_full_scan():
             ):
                 item = _make_watch_item(res)
                 new_watches.append(item)
-                log.info(f'  📋 Watch 등록: {ticker} [{res["grade"]}] {res["score"]}점 '
-                         f'd_short:{res["d_short_cycle"]} d_mid:{res["d_mid_cycle"]}')
+                log.info(
+                    f'  📋 Watch 등록: {ticker} [{res["grade"]}] {res["score"]}점 '
+                    f'd_short:{res["d_short_cycle"]} d_mid:{res["d_mid_cycle"]}'
+                )
                 add_event('📋', f'{ticker} Watch 등록 [{res["grade"]}] {res["score"]}점')
                 send_telegram(_fmt_watch_msg(item))
 
@@ -957,9 +957,9 @@ def _run_price_check():
         _scanner_state['last_price_check'] = datetime.now().isoformat()
         _scanner_state['price_checking']   = False
 
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 # 루프 함수
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 
 def scanner_loop():
     log.info(f'🚀 scanner_loop 시작 (주기: {SCAN_INTERVAL_MIN}분)')
@@ -1056,3 +1056,12 @@ def daily_summary_loop():
 
         except Exception as e:
             log.error(f'daily_summary_loop 오류: {e}')
+
+
+def get_scanner_state() -> dict:
+    with _state_lock:
+        return dict(_scanner_state)
+
+
+print(f'✅ Scanner v{VERSION} 로드 완료')
+print(f'   MTF: {MTF_VERSION}')
