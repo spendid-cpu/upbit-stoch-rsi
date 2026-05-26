@@ -51,6 +51,8 @@ TRADE_TIMEOUT_H = int(os.environ.get('TRADE_TIMEOUT_H',  '48'))
 BTC_DROP_1H_PCT = float(os.environ.get('BTC_DROP_1H_PCT', '-1.0'))
 BTC_DROP_4H_PCT = float(os.environ.get('BTC_DROP_4H_PCT', '-2.0'))
 
+PORT = int(os.environ.get('PORT', '8080'))
+
 WATCH_EXPIRE_DAYS = {'S': 7, 'A': 7, 'B': 5, 'C': 3, 'X': 1, '-': 1}
 
 # 스테이블 코인 제외
