@@ -19,6 +19,7 @@ import requests
 import mtf_setup
 
 VERSION = 'v3.0.2'
+MTF_VERSION = _mtf.VERSION
 
 # ── 로깅 ──────────────────────────────────────────────────────
 logging.basicConfig(
