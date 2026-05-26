@@ -1,416 +1,398 @@
 """
-mtf_setup.py v3.1.1
+mtf_setup.py v3.0.2
 변경사항:
-- v3.0.1: StochRSI K+D 단기/중기/장기 + 통합 점수 기반 등급
-- v3.0.2: C등급 Watch 등록 차단
-- v3.0.3: 타임프레임 정렬 강화, 등급 강화 (4h K≥70 타이밍경고)
-- v3.0.4: entry_price 보존, price_change = 등록가 대비
-- v3.0.5: 일봉 단기/중기 K 방향 점수 반영
-- v3.0.6: 일봉 단기 K>15 페널티
-- v3.1.0: 사이클 감지 (BOTTOM/RISING/PEAK/FALLING), K 5개 시점
-- v3.1.1: cycle_block Watch 완전차단 제거 → 점수 페널티로만 반영
-           PEAK/FALLING은 점수로 자연 필터링, Watch 차단은 BUY_NO+등급만
+- v3.0.1: 점수 기반 등급 일치, 주봉 MA20, BTC 일봉/주봉 MA20 동시 반환
+- v3.0.2: 사이클 감지 추가 (BOTTOM/RISING/PEAK/FALLING)
+           k_prev2 추가, calc_stoch_rsi cycle 반환
+           _calc_score 사이클 페널티 추가
 """
 
 import numpy as np
 
-VERSION = 'v3.1.1'
+VERSION = 'v3.0.2'
 
-# ── 파라미터 ──────────────────────────────────────────
+# ── 파라미터 정의 ─────────────────────────────────────────────
 PARAMS = {
-    'short': {'rsi': 14, 'stoch': 14, 'k_smooth': 3,  'd_smooth': 3},
-    'mid':   {'rsi': 21, 'stoch': 21, 'k_smooth': 5,  'd_smooth': 5},
-    'long':  {'rsi': 42, 'stoch': 42, 'k_smooth': 9,  'd_smooth': 9},
+    'short': {'rsi':  5, 'stoch':  5, 'k_smooth':  3, 'd_smooth':  3},
+    'mid':   {'rsi': 10, 'stoch': 10, 'k_smooth':  6, 'd_smooth':  6},
+    'long':  {'rsi': 20, 'stoch': 20, 'k_smooth': 12, 'd_smooth': 12},
 }
+
 OVERSOLD   = 20.0
 OVERBOUGHT = 80.0
 
-# ── 기본 계산 함수 ────────────────────────────────────
-def _rsi(closes, period):
-    closes = np.array(closes, dtype=float)
+
+# ══════════════════════════════════════════════════════════════
+# 핵심 계산 함수
+# ══════════════════════════════════════════════════════════════
+
+def _rsi(closes: np.ndarray, period: int) -> np.ndarray:
     if len(closes) < period + 1:
-        return np.full(len(closes), 50.0)
+        return np.full(len(closes), np.nan)
     deltas = np.diff(closes)
     gains  = np.where(deltas > 0, deltas, 0.0)
     losses = np.where(deltas < 0, -deltas, 0.0)
-    avg_g  = np.mean(gains[:period])
-    avg_l  = np.mean(losses[:period])
-    rsi_vals = [50.0] * (period + 1)
-    for i in range(period, len(deltas)):
-        avg_g = (avg_g * (period - 1) + gains[i])  / period
-        avg_l = (avg_l * (period - 1) + losses[i]) / period
-        rs    = avg_g / avg_l if avg_l != 0 else 1e9
-        rsi_vals.append(100 - 100 / (1 + rs))
-    result = np.full(len(closes), 50.0)
-    result[1:] = rsi_vals
-    return result
 
-def _sma(arr, period):
-    arr = np.array(arr, dtype=float)
-    if len(arr) < period:
-        return arr
-    result = np.full(len(arr), np.nan)
-    for i in range(period - 1, len(arr)):
-        result[i] = np.mean(arr[i - period + 1:i + 1])
-    return result
+    avg_gain = np.full(len(closes), np.nan)
+    avg_loss = np.full(len(closes), np.nan)
+    avg_gain[period] = gains[:period].mean()
+    avg_loss[period] = losses[:period].mean()
 
-def _stoch_rsi_k(closes, rsi_period, stoch_period, k_smooth):
-    rsi_vals = _rsi(closes, rsi_period)
-    k_arr    = np.full(len(rsi_vals), 50.0)
-    for i in range(stoch_period - 1, len(rsi_vals)):
-        window = rsi_vals[i - stoch_period + 1:i + 1]
-        lo, hi = np.min(window), np.max(window)
-        k_arr[i] = (rsi_vals[i] - lo) / (hi - lo) * 100 if hi != lo else 50.0
-    k_smooth_arr = _sma(k_arr, k_smooth)
+    for i in range(period + 1, len(closes)):
+        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gains[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period - 1) + losses[i-1]) / period
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rs  = np.where(avg_loss == 0, np.inf, avg_gain / avg_loss)
+        rsi = np.where(avg_loss == 0, 100.0, 100.0 - 100.0 / (1.0 + rs))
+
+    rsi[:period] = np.nan
+    return rsi
+
+
+def _stoch_rsi_k(rsi_arr: np.ndarray, stoch_period: int, k_smooth: int) -> np.ndarray:
+    n     = len(rsi_arr)
+    raw_k = np.full(n, np.nan)
+
+    for i in range(stoch_period - 1, n):
+        window = rsi_arr[i - stoch_period + 1 : i + 1]
+        valid  = window[~np.isnan(window)]
+        if len(valid) < stoch_period:
+            continue
+        lo, hi = valid.min(), valid.max()
+        raw_k[i] = 50.0 if hi == lo else (rsi_arr[i] - lo) / (hi - lo) * 100.0
+
+    k_smooth_arr = np.full(n, np.nan)
+    for i in range(k_smooth - 1, n):
+        window = raw_k[i - k_smooth + 1 : i + 1]
+        valid  = window[~np.isnan(window)]
+        if len(valid) == k_smooth:
+            k_smooth_arr[i] = valid.mean()
+
     return k_smooth_arr
 
-# ── 사이클 감지 ───────────────────────────────────────
-def _detect_cycle(k_series):
-    """
-    k_series: [k_prev4, k_prev3, k_prev2, k_prev1, k_now] 5개
-    반환: 'BOTTOM' / 'RISING' / 'PEAK' / 'FALLING'
-    """
-    if len(k_series) < 3:
-        return 'RISING'
 
-    k_now   = k_series[-1]
-    k_prev1 = k_series[-2]
-    k_prev2 = k_series[-3]
+def _sma(arr: np.ndarray, period: int) -> np.ndarray:
+    result = np.full(len(arr), np.nan)
+    for i in range(period - 1, len(arr)):
+        window = arr[i - period + 1 : i + 1]
+        valid  = window[~np.isnan(window)]
+        if len(valid) == period:
+            result[i] = valid.mean()
+    return result
 
+
+# ══════════════════════════════════════════════════════════════
+# 사이클 감지 (v3.0.2 추가)
+# ══════════════════════════════════════════════════════════════
+
+def _detect_cycle(k_now: float, k_prev1: float, k_prev2: float) -> str:
+    """
+    K값 3개로 사이클 위치 판단
+    BOTTOM  : K≤20, 올라오는 중 (최적 진입)
+    RISING  : K 상승 중
+    PEAK    : 고점에서 꺾임 시작
+    FALLING : 하락 중
+    """
     slope_now  = k_now   - k_prev1
     slope_prev = k_prev1 - k_prev2
 
-    # BOTTOM: 과매도 구간에서 올라오는 중
     if k_now <= OVERSOLD and slope_now >= 0:
         return 'BOTTOM'
-
-    # FALLING → BOTTOM 진입 직전
     if k_now <= OVERSOLD and slope_now < 0:
         return 'FALLING'
-
-    # PEAK: 고점에서 막 꺾임
     if slope_now < 0 and slope_prev > 0 and k_now > OVERSOLD:
         return 'PEAK'
-
-    # FALLING: 하락 가속
     if slope_now < 0 and slope_prev <= 0 and k_now > OVERSOLD:
         return 'FALLING'
-
-    # RISING: 상승 중
-    if slope_now >= 0 and k_now > OVERSOLD:
-        return 'RISING'
-
     return 'RISING'
 
-# ── StochRSI 계산 ─────────────────────────────────────
-def calc_stoch_rsi(closes, rsi_period, stoch_period, k_smooth, d_smooth):
-    closes = np.array(closes, dtype=float)
-    min_len = rsi_period + stoch_period + max(k_smooth, d_smooth) + 10
-    if len(closes) < min_len:
-        return {
-            'k': 50.0, 'd': 50.0,
-            'prev_k': 50.0, 'prev_d': 50.0,
-            'k_series': [50.0] * 5,
-            'gc': False, 'dc': False,
-            'zone': 'neutral', 'signal': 'NEUTRAL',
-            'cycle': 'RISING'
-        }
 
-    k_arr = _stoch_rsi_k(closes, rsi_period, stoch_period, k_smooth)
-    d_arr = _sma(k_arr, d_smooth)
+# ══════════════════════════════════════════════════════════════
+# StochRSI 계산
+# ══════════════════════════════════════════════════════════════
 
-    valid = ~np.isnan(d_arr)
-    if valid.sum() < 6:
-        return {
-            'k': 50.0, 'd': 50.0,
-            'prev_k': 50.0, 'prev_d': 50.0,
-            'k_series': [50.0] * 5,
-            'gc': False, 'dc': False,
-            'zone': 'neutral', 'signal': 'NEUTRAL',
-            'cycle': 'RISING'
-        }
+def calc_stoch_rsi(closes: list, term: str) -> dict:
+    p          = PARAMS[term]
+    closes_arr = np.array(closes, dtype=float)
+    min_len    = p['rsi'] + p['stoch'] + p['k_smooth'] + p['d_smooth'] + 5
 
-    valid_idx = np.where(valid)[0]
-    idx       = valid_idx[-1]
+    if len(closes_arr) < min_len:
+        return _empty_result()
 
-    k_now   = float(k_arr[idx])
-    d_now   = float(d_arr[idx])
-    k_prev1 = float(k_arr[idx - 1]) if idx >= 1 else k_now
-    d_prev1 = float(d_arr[idx - 1]) if idx >= 1 else d_now
-    k_prev2 = float(k_arr[idx - 2]) if idx >= 2 else k_prev1
-    k_prev3 = float(k_arr[idx - 3]) if idx >= 3 else k_prev2
-    k_prev4 = float(k_arr[idx - 4]) if idx >= 4 else k_prev3
+    rsi_arr = _rsi(closes_arr, p['rsi'])
+    k_arr   = _stoch_rsi_k(rsi_arr, p['stoch'], p['k_smooth'])
+    d_arr   = _sma(k_arr, p['d_smooth'])
 
-    k_series = [k_prev4, k_prev3, k_prev2, k_prev1, k_now]
-    cycle    = _detect_cycle(k_series)
+    k_vals = k_arr[~np.isnan(k_arr)]
+    d_vals = d_arr[~np.isnan(d_arr)]
 
-    # 골든크로스 / 데드크로스
-    gc = (k_prev1 <= d_prev1) and (k_now > d_now)
-    dc = (k_prev1 >= d_prev1) and (k_now < d_now)
+    if len(k_vals) < 3 or len(d_vals) < 2:
+        return _empty_result()
 
-    # 구간
-    if k_now <= OVERSOLD:
+    k       = round(float(k_vals[-1]), 2)
+    k_prev  = round(float(k_vals[-2]), 2)
+    k_prev2 = round(float(k_vals[-3]), 2)  # v3.0.2 추가
+
+    d      = round(float(d_vals[-1]), 2)
+    d_prev = round(float(d_vals[-2]), 2)
+
+    golden_cross = (k_prev <= d_prev) and (k > d)
+    dead_cross   = (k_prev >= d_prev) and (k < d)
+
+    if k <= OVERSOLD:
         zone = 'oversold'
-    elif k_now >= OVERBOUGHT:
+    elif k >= OVERBOUGHT:
         zone = 'overbought'
     else:
         zone = 'neutral'
 
-    # 시그널 - PEAK/FALLING이어도 BUY_NO 대신 NEUTRAL로 완화
-    if zone == 'overbought':
-        signal = 'BUY_NO'
-    elif zone == 'oversold' and cycle == 'BOTTOM':
-        signal = 'BUY_OK'
-    elif zone == 'oversold' and gc:
-        signal = 'BUY_OK'
-    elif zone == 'oversold':
-        signal = 'WATCH'
-    elif cycle in ('PEAK', 'FALLING') and k_now > 40:
-        # 높은 구간에서 꺾이는 경우만 BUY_NO
-        signal = 'BUY_NO'
-    else:
-        signal = 'NEUTRAL'
+    signal = _get_signal(k, d, k_prev, d_prev, golden_cross, dead_cross, zone)
+    cycle  = _detect_cycle(k, k_prev, k_prev2)  # v3.0.2 추가
 
     return {
-        'k':        k_now,
-        'd':        d_now,
-        'prev_k':   k_prev1,
-        'prev_d':   d_prev1,
-        'k_series': k_series,
-        'gc':       gc,
-        'dc':       dc,
-        'zone':     zone,
-        'signal':   signal,
-        'cycle':    cycle
+        'k':            k,
+        'd':            d,
+        'k_prev':       k_prev,
+        'd_prev':       d_prev,
+        'golden_cross': golden_cross,
+        'dead_cross':   dead_cross,
+        'zone':         zone,
+        'signal':       signal,
+        'cycle':        cycle,   # v3.0.2 추가
     }
 
-# ── MTF 분석 ──────────────────────────────────────────
-def analyze_mtf(daily_closes, h4_closes, h1_closes):
-    results = {}
-    for tf, closes in [('daily', daily_closes), ('h4', h4_closes), ('h1', h1_closes)]:
-        for label, p in PARAMS.items():
-            key = f'{tf}_{label}'
-            results[key] = calc_stoch_rsi(
-                closes,
-                p['rsi'], p['stoch'], p['k_smooth'], p['d_smooth']
-            )
-    return results
 
-# ── 타임프레임 정렬 카운트 ────────────────────────────
-def _count_aligned_timeframes(d_long, d_mid, d_short, h4_short, h1_short):
-    count = 0
-    if d_long.get('zone')   == 'oversold':                     count += 1
-    if d_mid.get('cycle')   in ('BOTTOM', 'RISING'):           count += 1
-    if d_short.get('cycle') == 'BOTTOM':                       count += 1
-    if h4_short.get('signal') in ('BUY_OK', 'WATCH'):         count += 1
-    if h1_short.get('signal') in ('BUY_OK', 'WATCH'):         count += 1
-    return count
+def _get_signal(k, d, k_prev, d_prev, golden_cross, dead_cross, zone) -> str:
+    if zone == 'overbought' and (dead_cross or k < d):
+        return 'BUY_NO'
+    if zone == 'oversold' and golden_cross:
+        return 'BUY_OK'
+    if zone == 'oversold' and k <= d:
+        return 'WATCH'
+    if k > OVERSOLD and k_prev <= OVERSOLD and k > d:
+        return 'BUY_OK'
+    return 'NEUTRAL'
 
-# ── 점수 계산 ─────────────────────────────────────────
-def _calc_score(mtf: dict) -> int:
-    d_long  = mtf.get('daily_long',  {})
-    d_mid   = mtf.get('daily_mid',   {})
-    d_short = mtf.get('daily_short', {})
-    h4_s    = mtf.get('h4_short',    {})
-    h1_s    = mtf.get('h1_short',    {})
 
-    score = 0
+def _empty_result() -> dict:
+    return {
+        'k': None, 'd': None,
+        'k_prev': None, 'd_prev': None,
+        'golden_cross': False, 'dead_cross': False,
+        'zone': 'neutral', 'signal': 'NEUTRAL',
+        'cycle': 'RISING',  # v3.0.2 추가
+    }
 
-    # ── 일봉 장기 ──────────────────────────────────────
-    if d_long.get('zone') == 'oversold':
-        score += 15
-    if d_long.get('signal') == 'BUY_OK':
-        score += 10
-    if d_long.get('gc'):
-        score += 5
 
-    # ── 일봉 중기 사이클 기반 ──────────────────────────
-    mid_cycle = d_mid.get('cycle', 'RISING')
-    if mid_cycle == 'BOTTOM':
-        score += 20
-    elif mid_cycle == 'RISING':
-        score += 8
-    elif mid_cycle == 'PEAK':
-        score -= 15
-    elif mid_cycle == 'FALLING':
-        score -= 20
+# ══════════════════════════════════════════════════════════════
+# 멀티 타임프레임 통합 분석
+# ══════════════════════════════════════════════════════════════
 
-    if d_mid.get('signal') == 'BUY_OK':
-        score += 10
-    if d_mid.get('gc'):
-        score += 5
+def analyze_mtf(candles: dict) -> dict:
+    result = {}
+    for tf in ('daily', 'h4', 'h1'):
+        closes     = candles.get(tf, [])
+        result[tf] = {}
+        for term in ('short', 'mid', 'long'):
+            result[tf][term] = calc_stoch_rsi(closes, term)
 
-    # ── 일봉 단기 사이클 기반 ──────────────────────────
-    short_cycle = d_short.get('cycle', 'RISING')
-    if short_cycle == 'BOTTOM':
-        score += 20
-    elif short_cycle == 'RISING':
-        score += 5
-    elif short_cycle == 'PEAK':
-        score -= 15
-    elif short_cycle == 'FALLING':
-        score -= 20
+    result['summary'] = _summarize(result)
+    return result
 
-    if d_short.get('signal') == 'BUY_OK':
-        score += 5
-    if d_short.get('gc'):
-        score += 3
 
-    # ── 단기+중기 동시 PEAK/FALLING 추가 페널티 ────────
-    bad_cycles = {'PEAK', 'FALLING'}
-    if short_cycle in bad_cycles and mid_cycle in bad_cycles:
-        score -= 15
-
-    # ── 4h 단기 ────────────────────────────────────────
-    h4_cycle = h4_s.get('cycle', 'RISING')
-    h4_k     = h4_s.get('k', 50.0)
-    if h4_cycle == 'BOTTOM':
-        score += 10
-    elif h4_cycle == 'RISING' and h4_k <= 35:
-        score += 5
-    elif h4_cycle == 'PEAK':
-        score -= 10
-    elif h4_cycle == 'FALLING':
-        score -= 10
-
-    if h4_s.get('signal') == 'BUY_OK':
-        score += 5
-    if h4_s.get('gc'):
-        score += 3
-
-    # ── 1h 단기 ────────────────────────────────────────
-    h1_cycle = h1_s.get('cycle', 'RISING')
-    h1_k     = h1_s.get('k', 50.0)
-    if h1_cycle == 'BOTTOM':
-        score += 8
-    elif h1_cycle == 'RISING' and h1_k <= 35:
-        score += 3
-    elif h1_cycle == 'PEAK':
-        score -= 8
-    elif h1_cycle == 'FALLING':
-        score -= 8
-
-    if h1_s.get('signal') == 'BUY_OK':
-        score += 3
-    if h1_s.get('gc'):
-        score += 5
-
-    # ── BUY_NO 페널티 (overbought만 강하게) ───────────
-    for key, data in [('daily_long', d_long), ('daily_mid', d_mid),
-                      ('daily_short', d_short), ('h4_short', h4_s), ('h1_short', h1_s)]:
-        if data.get('signal') == 'BUY_NO':
-            score -= 15
-
-    return max(0, min(100, score))
-
-# ── 요약 / 등급 ───────────────────────────────────────
 def _summarize(mtf: dict) -> dict:
-    d_long  = mtf.get('daily_long',  {})
-    d_mid   = mtf.get('daily_mid',   {})
-    d_short = mtf.get('daily_short', {})
-    h4_s    = mtf.get('h4_short',    {})
-    h1_s    = mtf.get('h1_short',    {})
+    daily = mtf.get('daily', {})
+    h4    = mtf.get('h4',    {})
+    h1    = mtf.get('h1',    {})
 
-    score   = _calc_score(mtf)
-    aligned = _count_aligned_timeframes(d_long, d_mid, d_short, h4_s, h1_s)
+    d_long   = daily.get('long',  _empty_result())
+    d_mid    = daily.get('mid',   _empty_result())
+    d_short  = daily.get('short', _empty_result())
+    h4_short = h4.get('short',    _empty_result())
+    h1_short = h1.get('short',    _empty_result())
 
-    # 골든크로스 여부
-    daily_gc = d_long.get('gc') or d_mid.get('gc') or d_short.get('gc')
-    h4_gc    = h4_s.get('gc', False)
-    h1_gc    = h1_s.get('gc', False)
+    any_buy_no = any([
+        d_long.get('signal')   == 'BUY_NO',
+        d_short.get('signal')  == 'BUY_NO',
+        h4_short.get('signal') == 'BUY_NO',
+        h1_short.get('signal') == 'BUY_NO',
+    ])
 
-    # BUY_NO: overbought만 적용
-    any_buy_no = any(
-        mtf.get(k, {}).get('signal') == 'BUY_NO'
-        for k in ['daily_long', 'daily_mid', 'daily_short', 'h4_short', 'h1_short']
-    )
+    d_long_os  = d_long.get('zone')  == 'oversold'
+    d_mid_os   = d_mid.get('zone')   == 'oversold'
+    d_short_os = d_short.get('zone') == 'oversold'
 
-    # 사이클 정보 (표시용 - 차단 아님)
-    short_cycle = d_short.get('cycle', 'RISING')
-    mid_cycle   = d_mid.get('cycle',   'RISING')
+    h4_gc = h4_short.get('signal') == 'BUY_OK'
+    h1_gc = h1_short.get('signal') == 'BUY_OK'
+    d_gc  = d_short.get('signal')  == 'BUY_OK'
 
-    # cycle_block: 정보 표시용만 (Watch 차단 안 함)
-    cycle_block = short_cycle in ('PEAK', 'FALLING') and mid_cycle in ('PEAK', 'FALLING')
+    watch_eligible = d_long_os and not any_buy_no
+    score = _calc_score(d_long, d_mid, d_short, h4_short, h1_short)
 
-    # 타이밍 경고
-    h4_k = h4_s.get('k', 0.0)
-    h1_k = h1_s.get('k', 0.0)
-    timing_warning    = h4_k >= 70
-    overbought_warning = h1_k >= 80
-
-    # 등급 - cycle_block은 등급에 영향 없음, 점수로만 반영
     if any_buy_no:
         grade = 'X'
-    elif score >= 85 and daily_gc and (h4_gc or h1_gc):
+    elif score >= 80:
         grade = 'S'
-    elif score >= 70 and (h4_gc or h1_gc):
+    elif score >= 65:
         grade = 'A'
-    elif score >= 55 and aligned >= 2:
+    elif score >= 45:
         grade = 'B'
-    elif d_long.get('zone') == 'oversold':
+    elif d_long_os:
         grade = 'C'
     else:
         grade = '-'
 
-    watch_eligible = grade in ('S', 'A', 'B') and not timing_warning and not overbought_warning
-    auto_entry     = watch_eligible and (h4_gc or h1_gc) and not timing_warning and not overbought_warning
+    auto_entry = (
+        not any_buy_no and
+        d_long_os and
+        (h4_gc or h1_gc)
+    )
 
     return {
-        'grade':              grade,
-        'score':              score,
-        'aligned':            aligned,
-        'watch_eligible':     watch_eligible,
-        'auto_entry':         auto_entry,
-        'timing_warning':     timing_warning,
-        'overbought_warning': overbought_warning,
-        'daily_gc':           daily_gc,
-        'h4_gc':              h4_gc,
-        'h1_gc':              h1_gc,
-        'cycle_block':        cycle_block,
-        'd_short_cycle':      short_cycle,
-        'd_mid_cycle':        mid_cycle,
-        'd_long_zone':        d_long.get('zone', 'neutral'),
-        'h4_cycle':           h4_s.get('cycle', 'RISING'),
-        'h1_cycle':           h1_s.get('cycle', 'RISING'),
+        'grade':          grade,
+        'watch_eligible': watch_eligible,
+        'auto_entry':     auto_entry,
+        'any_buy_no':     any_buy_no,
+        'score':          score,
+        'h4_gc':          h4_gc,
+        'h1_gc':          h1_gc,
+        'd_gc':           d_gc,
+        'd_long_os':      d_long_os,
+        'd_mid_os':       d_mid_os,
+        'd_short_os':     d_short_os,
     }
 
-# ── BTC MA20 시그널 ───────────────────────────────────
-def btc_ma20_signal(closes, period=20):
-    closes = np.array(closes, dtype=float)
-    if len(closes) < period:
-        return {'signal': 'UNKNOWN', 'ma20': None, 'price': float(closes[-1]) if len(closes) else 0}
-    ma20  = float(np.mean(closes[-period:]))
-    price = float(closes[-1])
-    return {
-        'signal': 'ABOVE' if price > ma20 else 'BELOW',
-        'ma20':   round(ma20, 2),
-        'price':  round(price, 2)
+
+def _calc_score(d_long, d_mid, d_short, h4_short, h1_short) -> int:
+    score = 0
+
+    # 일봉 장기 과매도 (30점 + 극단 보너스 10점)
+    if d_long.get('zone') == 'oversold':
+        k = d_long.get('k') or 50
+        score += 30
+        if k <= 10:
+            score += 10
+
+    # 일봉 장기 골든크로스 (10점)
+    if d_long.get('signal') == 'BUY_OK':
+        score += 10
+
+    # 일봉 중기 과매도 (10점) + 골든크로스 (5점)
+    if d_mid.get('zone') == 'oversold':
+        score += 10
+    if d_mid.get('signal') == 'BUY_OK':
+        score += 5
+
+    # 일봉 단기 과매도 (5점) + 골든크로스 (5점)
+    if d_short.get('zone') == 'oversold':
+        score += 5
+    if d_short.get('signal') == 'BUY_OK':
+        score += 5
+
+    # 4h 골든크로스 (20점) / 과매도만 (8점)
+    if h4_short.get('signal') == 'BUY_OK':
+        score += 20
+    elif h4_short.get('zone') == 'oversold':
+        score += 8
+
+    # 1h 골든크로스 (15점) / 과매도만 (5점)
+    if h1_short.get('signal') == 'BUY_OK':
+        score += 15
+    elif h1_short.get('zone') == 'oversold':
+        score += 5
+
+    # 패널티
+    if d_long.get('signal')   == 'BUY_NO':
+        score = max(0, score - 40)
+    if h4_short.get('signal') == 'BUY_NO':
+        score = max(0, score - 20)
+    if h1_short.get('signal') == 'BUY_NO':
+        score = max(0, score - 10)
+
+    # ── 사이클 페널티 (v3.0.2 추가) ──────────────────────────
+    d_short_cycle = d_short.get('cycle', 'RISING')
+    d_mid_cycle   = d_mid.get('cycle',   'RISING')
+
+    if d_short_cycle == 'PEAK':    score = max(0, score - 15)
+    if d_short_cycle == 'FALLING': score = max(0, score - 20)
+    if d_mid_cycle   == 'PEAK':    score = max(0, score - 10)
+    if d_mid_cycle   == 'FALLING': score = max(0, score - 15)
+
+    # 단기+중기 동시 하락 추가 페널티
+    if d_short_cycle in ('PEAK', 'FALLING') and d_mid_cycle in ('PEAK', 'FALLING'):
+        score = max(0, score - 15)
+
+    return min(score, 100)
+
+
+# ══════════════════════════════════════════════════════════════
+# BTC MA20 (일봉 + 주봉)
+# ══════════════════════════════════════════════════════════════
+
+def btc_ma20_signal(btc_daily_closes: list, btc_weekly_closes: list = None) -> dict:
+    result = {
+        'price':        None,
+        'daily_ma20':   None,
+        'daily_above':  None,
+        'daily_pct':    0.0,
+        'weekly_ma20':  None,
+        'weekly_above': None,
+        'weekly_pct':   0.0,
     }
 
-# ── 상대강도 ──────────────────────────────────────────
-def calc_relative_strength(coin_closes, btc_closes, period=20):
-    if len(coin_closes) < period + 1 or len(btc_closes) < period + 1:
-        return {'rs': 1.0, 'grade': 'B'}
-    coin_ret = (coin_closes[-1] - coin_closes[-period]) / coin_closes[-period] * 100
-    btc_ret  = (btc_closes[-1]  - btc_closes[-period])  / btc_closes[-period]  * 100
-    rs = coin_ret - btc_ret
-    if   rs >= 10:  rs_grade = 'S'
-    elif rs >= 3:   rs_grade = 'A'
-    elif rs >= -3:  rs_grade = 'B'
-    elif rs >= -10: rs_grade = 'C'
-    else:           rs_grade = '-'
-    return {'rs': round(rs, 2), 'grade': rs_grade}
+    if not btc_daily_closes or len(btc_daily_closes) < 20:
+        return result
 
-# ── 전체 래퍼 ─────────────────────────────────────────
-def full_analyze(daily_closes, h4_closes, h1_closes):
-    mtf     = analyze_mtf(daily_closes, h4_closes, h1_closes)
-    summary = _summarize(mtf)
-    return {**mtf, **summary}
+    price = float(btc_daily_closes[-1])
+    result['price'] = price
 
-# ── 모듈 로드 확인 ────────────────────────────────────
+    # 일봉 MA20
+    daily_arr         = np.array(btc_daily_closes[-20:], dtype=float)
+    daily_ma20        = float(daily_arr.mean())
+    result['daily_ma20']  = round(daily_ma20, 0)
+    result['daily_above'] = price > daily_ma20
+    result['daily_pct']   = round((price - daily_ma20) / daily_ma20 * 100, 2)
+
+    # 주봉 MA20
+    if btc_weekly_closes and len(btc_weekly_closes) >= 20:
+        weekly_arr         = np.array(btc_weekly_closes[-20:], dtype=float)
+        weekly_ma20        = float(weekly_arr.mean())
+        result['weekly_ma20']  = round(weekly_ma20, 0)
+        result['weekly_above'] = price > weekly_ma20
+        result['weekly_pct']   = round((price - weekly_ma20) / weekly_ma20 * 100, 2)
+
+    return result
+
+
+# ══════════════════════════════════════════════════════════════
+# DEEP 상대강도
+# ══════════════════════════════════════════════════════════════
+
+def calc_relative_strength(coin_pct: float, btc_pct: float) -> dict:
+    rs = round(coin_pct - btc_pct, 2)
+
+    if rs >= 5.0:
+        grade  = 'S'
+        signal = 'STRONG_BUY'
+    elif rs >= 3.0:
+        grade  = 'A'
+        signal = 'BUY'
+    elif rs >= 2.0:
+        grade  = 'B'
+        signal = 'WATCH'
+    elif rs >= 0:
+        grade  = 'C'
+        signal = 'NEUTRAL'
+    else:
+        grade  = '-'
+        signal = 'WEAK'
+
+    return {'rs': rs, 'grade': grade, 'signal': signal}
+
+
+# ── 모듈 로드 확인 ────────────────────────────────────────────
 if __name__ == '__main__' or True:
     print(f'mtf_setup.py {VERSION} 로드 완료 ✅')
-    print(f'  사이클 감지: BOTTOM🟢 / RISING🔵 / PEAK🔴 / FALLING⚫')
-    print(f'  cycle_block = 표시용만 (Watch 차단 없음)')
-    print(f'  PEAK/FALLING → 점수 페널티로만 필터링')
-    print(f'  등급: S(≥85+GC) / A(≥70+GC) / B(≥55+aligned≥2) / X(overbought BUY_NO만)')
+    print(f'  사이클 감지: BOTTOM / RISING / PEAK / FALLING')
+    print(f'  PEAK/FALLING → 점수 페널티로 자연 필터링')
