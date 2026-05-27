@@ -1,11 +1,12 @@
 """
-scanner.py v3.0.9
+scanner.py v3.1.0
 변경사항:
-- v3.0.9: BTC 반등 감지 로직 추가
-           btc_fast_loop 내 FALLING→BOTTOM 전환 감지
-           DEEP RS 강세 코인 자동 Watch 등록 (2시간 이내 데이터만)
-           반등 감지 텔레그램 알림
-           reg_from = 'deep_rebound' 태그
+- v3.0.9: BTC 반등 감지, DEEP RS 자동 Watch 등록
+- v3.1.0: 다이버전스 탐지 추가 (bull/bear/hidden_bull)
+           analyze_ticker에 div 필드 추가
+           _make_watch_item에 div 필드 저장
+           _run_watch_rescan에 하락 다이버전스 Watch 해제 조건 추가
+           점수에 div_bonus 반영
 """
 
 import os
@@ -22,7 +23,7 @@ import requests
 import mtf_setup as _mtf
 from mtf_setup import VERSION as MTF_VERSION
 
-VERSION = 'v3.0.9'
+VERSION = 'v3.1.0'
 PORT    = int(os.environ.get('PORT', '8080'))
 KST     = timezone(timedelta(hours=9))
 
@@ -51,7 +52,6 @@ ACTIVE_CHECK_INTERVAL_MIN = int(os.environ.get('ACTIVE_CHECK_INTERVAL_MIN', '1')
 DEEP_SCAN_INTERVAL_MIN    = int(os.environ.get('DEEP_SCAN_INTERVAL_MIN',    '5'))
 DAILY_SUMMARY_HOUR_KST    = int(os.environ.get('DAILY_SUMMARY_HOUR_KST',   '9'))
 
-# v3.0.9: 반등 감지용 DEEP 데이터 유효 시간 (시간)
 DEEP_REBOUND_VALID_HOURS  = int(os.environ.get('DEEP_REBOUND_VALID_HOURS', '2'))
 
 REQUEST_DELAY = float(os.environ.get('REQUEST_DELAY', '0.35'))
@@ -89,51 +89,50 @@ os.makedirs(BASE_DIR, exist_ok=True)
 
 _state_lock    = threading.Lock()
 _scanner_state = {
-    'version':             VERSION,
-    'mtf_version':         MTF_VERSION,
-    'running':             False,
-    'watch_rescanning':    False,
-    'price_checking':      False,
-    'deep_scanning':       False,
-    'last_scan':           None,
-    'last_watch_rescan':   None,
-    'last_price_check':    None,
-    'last_deep_scan':      None,
-    'next_scan':           None,
-    'next_deep_scan':      None,
-    'scan_count':          0,
-    'watch_count':         0,
-    'active_count':        0,
-    'deep_count':          0,
-    'btc_price':           None,
-    'btc_price_usd':       None,
-    'usdt_rate':           None,
-    'btc_daily_ma20':      None,
-    'btc_daily_ma20_usd':  None,
-    'btc_daily_above':     None,
-    'btc_daily_pct':       None,
-    'btc_weekly_ma20':     None,
-    'btc_weekly_ma20_usd': None,
-    'btc_weekly_above':    None,
-    'btc_weekly_pct':      None,
-    'btc_1h_pct':          None,
-    'btc_4h_pct':          None,
-    'btc_d_short_cycle':   None,
-    'btc_d_mid_cycle':     None,
-    'btc_h4_cycle':        None,
-    'btc_h1_cycle':        None,
-    'btc_m15_cycle':       None,
-    'btc_m15_gc':          False,
-    'btc_m5_cycle':        None,
-    'btc_m5_gc':           False,
-    'btc_entry_signal':    None,
-    # v3.0.9 신규
+    'version':              VERSION,
+    'mtf_version':          MTF_VERSION,
+    'running':              False,
+    'watch_rescanning':     False,
+    'price_checking':       False,
+    'deep_scanning':        False,
+    'last_scan':            None,
+    'last_watch_rescan':    None,
+    'last_price_check':     None,
+    'last_deep_scan':       None,
+    'next_scan':            None,
+    'next_deep_scan':       None,
+    'scan_count':           0,
+    'watch_count':          0,
+    'active_count':         0,
+    'deep_count':           0,
+    'btc_price':            None,
+    'btc_price_usd':        None,
+    'usdt_rate':            None,
+    'btc_daily_ma20':       None,
+    'btc_daily_ma20_usd':   None,
+    'btc_daily_above':      None,
+    'btc_daily_pct':        None,
+    'btc_weekly_ma20':      None,
+    'btc_weekly_ma20_usd':  None,
+    'btc_weekly_above':     None,
+    'btc_weekly_pct':       None,
+    'btc_1h_pct':           None,
+    'btc_4h_pct':           None,
+    'btc_d_short_cycle':    None,
+    'btc_d_mid_cycle':      None,
+    'btc_h4_cycle':         None,
+    'btc_h1_cycle':         None,
+    'btc_m15_cycle':        None,
+    'btc_m15_gc':           False,
+    'btc_m5_cycle':         None,
+    'btc_m5_gc':            False,
+    'btc_entry_signal':     None,
     'btc_rebound_detected': False,
     'btc_rebound_at':       None,
-    'total_trades':        0,
-    'win_trades':          0,
-    'total_pnl':           0.0,
-    'error':               None,
+    'total_trades':         0,
+    'win_trades':           0,
+    'total_pnl':            0.0,
+    'error':                None,
 }
 
 
@@ -361,8 +360,14 @@ def send_telegram(msg: str):
 def _fmt_watch_msg(item: dict) -> str:
     deep_tag = f' 🔥RS-{item["deep_rs_grade"]}' if item.get('deep_rs_grade') not in (None,'-') else ''
     reg_tag  = ' 📡반등감지' if item.get('reg_from') == 'deep_rebound' else ''
+    # v3.1.0: 다이버전스 태그
+    div_tag  = ''
+    if item.get('bull_div'):
+        div_tag = ' 🔼BULL DIV'
+    elif item.get('hidden_bull'):
+        div_tag = ' ↗HID BULL'
     return (
-        f'📋 <b>Watch 등록</b>{reg_tag}\n'
+        f'📋 <b>Watch 등록</b>{reg_tag}{div_tag}\n'
         f'종목: <b>{item["ticker"]}</b>{deep_tag} | 등급: <b>{item.get("grade","-")}</b>\n'
         f'등록가: {item.get("reg_price",0):,.0f} KRW\n'
         f'점수: {item.get("score",0)}점\n'
@@ -405,7 +410,6 @@ def _fmt_deep_msg(items: list, btc_pct: str) -> str:
     return '\n'.join(lines) + f'\n⏰ {_now_hm()}'
 
 def _fmt_rebound_msg(items: list, registered: list) -> str:
-    """BTC 반등 감지 + 자동 Watch 등록 텔레그램 메시지"""
     lines = [f'⚡ <b>BTC 반등 감지!</b> (1h FALLING→BOTTOM)\n']
     lines.append(f'📋 RS 강세 {len(registered)}개 Watch 자동 등록\n')
     for it in items[:5]:
@@ -415,6 +419,97 @@ def _fmt_rebound_msg(items: list, registered: list) -> str:
             f'RS: {it.get("rs",0):+.1f}%'
         )
     return '\n'.join(lines) + f'\n⏰ {_now_hm()}'
+
+
+# ══════════════════════════════════════════════════════════════════
+# v3.1.0: 다이버전스 분석 헬퍼
+# ══════════════════════════════════════════════════════════════════
+def _analyze_divergence(daily: list, h4: list, h1: list) -> dict:
+    """
+    일봉/4h/1h 다이버전스 탐지 후 통합 결과 반환
+    점수 보너스/패널티 포함
+    """
+    div_daily = _mtf.detect_divergence(daily, 'long',  lookback=60)
+    div_h4    = _mtf.detect_divergence(h4,    'short', lookback=60)
+    div_h1    = _mtf.detect_divergence(h1,    'short', lookback=40)
+
+    # ── 점수 보너스/패널티 계산 ───────────────────────────────────
+    div_bonus = 0
+
+    # 상승 다이버전스 보너스
+    if div_daily.get('bull_div'):
+        div_bonus += 15 if div_daily['div_strength'] == 'STRONG' else 8
+    if div_h4.get('bull_div'):
+        div_bonus += 10 if div_h4['div_strength'] == 'STRONG' else 5
+    if div_h1.get('bull_div'):
+        div_bonus += 5
+    # 히든 상승 (추세 지속)
+    if div_daily.get('hidden_bull') or div_h4.get('hidden_bull'):
+        div_bonus += 5
+    if div_h1.get('hidden_bull'):
+        div_bonus += 3
+
+    # 하락 다이버전스 패널티
+    if div_daily.get('bear_div'):
+        div_bonus -= 15 if div_daily['div_strength'] == 'STRONG' else 8
+    if div_h4.get('bear_div'):
+        div_bonus -= 10 if div_h4['div_strength'] == 'STRONG' else 5
+    if div_h1.get('bear_div'):
+        div_bonus -= 5
+
+    # ── 다중 시간대 동시 감지 시 강화 ────────────────────────────
+    # 일봉 + 4h 동시 상승 다이버전스 → 강력 신호
+    if div_daily.get('bull_div') and div_h4.get('bull_div'):
+        div_bonus += 10
+    # 일봉 + 4h 동시 하락 다이버전스 → 강력 경고
+    if div_daily.get('bear_div') and div_h4.get('bear_div'):
+        div_bonus -= 10
+
+    # ── 종합 div_type 결정 ───────────────────────────────────────
+    # 우선순위: 일봉 > 4h > 1h
+    if div_daily.get('bull_div'):
+        div_type = 'BULL'
+    elif div_h4.get('bull_div'):
+        div_type = 'BULL'
+    elif div_h1.get('bull_div'):
+        div_type = 'BULL'
+    elif div_daily.get('bear_div'):
+        div_type = 'BEAR'
+    elif div_h4.get('bear_div'):
+        div_type = 'BEAR'
+    elif div_h1.get('bear_div'):
+        div_type = 'BEAR'
+    elif div_daily.get('hidden_bull') or div_h4.get('hidden_bull') or div_h1.get('hidden_bull'):
+        div_type = 'HIDDEN_BULL'
+    elif div_daily.get('hidden_bear') or div_h4.get('hidden_bear'):
+        div_type = 'HIDDEN_BEAR'
+    else:
+        div_type = 'NONE'
+
+    # 강도: 일봉 기준 우선, 없으면 4h
+    div_strength = (
+        div_daily.get('div_strength') or
+        div_h4.get('div_strength')    or
+        div_h1.get('div_strength')    or
+        'NONE'
+    )
+    if div_strength == 'NONE' and div_type != 'NONE':
+        div_strength = 'WEAK'
+
+    return {
+        'bull_div':       div_type in ('BULL',),
+        'bear_div':       div_type in ('BEAR',),
+        'hidden_bull':    div_type == 'HIDDEN_BULL',
+        'hidden_bear':    div_type == 'HIDDEN_BEAR',
+        'div_type':       div_type,
+        'div_strength':   div_strength,
+        'div_daily':      div_daily.get('div_type', 'NONE'),
+        'div_h4':         div_h4.get('div_type',    'NONE'),
+        'div_h1':         div_h1.get('div_type',    'NONE'),
+        'div_bonus':      div_bonus,
+        # 하락 다이버전스 Watch 해제용 상세 정보
+        '_div_h4_raw':    div_h4,
+    }
 
 
 def analyze_ticker(market: str):
@@ -436,12 +531,19 @@ def analyze_ticker(market: str):
         deep_rs_grade = _get_deep_rs_grade(ticker)
         base_score    = summary.get('score', 0)
 
+        # DEEP RS 보너스
         deep_bonus  = {'S': 15, 'A': 10, 'B': 5}
         bonus       = deep_bonus.get(deep_rs_grade, 0)
-        final_score = min(base_score + bonus, 100)
+
+        # ── v3.1.0: 다이버전스 분석 ──────────────────────────────
+        div_info  = _analyze_divergence(daily, h4, h1)
+        div_bonus = div_info['div_bonus']
+
+        final_score = min(base_score + bonus + div_bonus, 100)
+        final_score = max(final_score, 0)
 
         grade = summary.get('grade', '-')
-        if bonus > 0 and not summary.get('any_buy_no'):
+        if (bonus > 0 or div_bonus > 0) and not summary.get('any_buy_no'):
             if final_score >= 80:   grade = 'S'
             elif final_score >= 65: grade = 'A'
             elif final_score >= 45: grade = 'B'
@@ -481,6 +583,17 @@ def analyze_ticker(market: str):
             'h4_cycle':           mtf['h4']['short'].get('cycle',    'RISING'),
             'h1_cycle':           mtf['h1']['short'].get('cycle',    'RISING'),
             'deep_rs_grade':      deep_rs_grade,
+            # v3.1.0: 다이버전스 필드
+            'bull_div':           div_info['bull_div'],
+            'bear_div':           div_info['bear_div'],
+            'hidden_bull':        div_info['hidden_bull'],
+            'hidden_bear':        div_info['hidden_bear'],
+            'div_type':           div_info['div_type'],
+            'div_strength':       div_info['div_strength'],
+            'div_daily':          div_info['div_daily'],
+            'div_h4':             div_info['div_h4'],
+            'div_h1':             div_info['div_h1'],
+            'div_bonus':          div_bonus,
             'analyzed_at':        _now_iso(),
         }
     except Exception as e:
@@ -533,11 +646,20 @@ def _make_watch_item(res: dict, reg_from: str = 'scan') -> dict:
         'h4_cycle':      res.get('h4_cycle',       'RISING'),
         'h1_cycle':      res.get('h1_cycle',       'RISING'),
         'deep_rs_grade': res.get('deep_rs_grade', '-'),
+        # v3.1.0: 다이버전스
+        'bull_div':      res.get('bull_div',    False),
+        'bear_div':      res.get('bear_div',    False),
+        'hidden_bull':   res.get('hidden_bull', False),
+        'div_type':      res.get('div_type',    'NONE'),
+        'div_strength':  res.get('div_strength','NONE'),
+        'div_daily':     res.get('div_daily',   'NONE'),
+        'div_h4':        res.get('div_h4',      'NONE'),
+        'div_h1':        res.get('div_h1',      'NONE'),
         'added_at':      now,
         'expire_at':     expire_at,
         'score_history': [res.get('score', 0)],
         'rescan_count':  0,
-        'reg_from':      reg_from,   # v3.0.9: 등록 출처 태그
+        'reg_from':      reg_from,
     }
 
 
@@ -576,6 +698,11 @@ def _make_active_item(watch_item: dict, price: float, trade_type: str = 'auto') 
         'h4_cycle':      watch_item.get('h4_cycle',       'RISING'),
         'h1_cycle':      watch_item.get('h1_cycle',       'RISING'),
         'deep_rs_grade': watch_item.get('deep_rs_grade', '-'),
+        'bull_div':      watch_item.get('bull_div',    False),
+        'bear_div':      watch_item.get('bear_div',    False),
+        'hidden_bull':   watch_item.get('hidden_bull', False),
+        'div_type':      watch_item.get('div_type',    'NONE'),
+        'div_strength':  watch_item.get('div_strength','NONE'),
         'reg_from':      watch_item.get('reg_from', 'scan'),
     }
 
@@ -604,11 +731,7 @@ def close_active_item(item: dict, reason: str, close_price: float) -> dict:
     return closed
 
 
-# ══════════════════════════════════════════════════════════════════
-# v3.0.9: BTC 반등 감지 → DEEP RS 코인 자동 Watch 등록
-# ══════════════════════════════════════════════════════════════════
 def _is_deep_data_valid(item: dict) -> bool:
-    """DEEP 스캔 데이터가 DEEP_REBOUND_VALID_HOURS 시간 이내인지 확인"""
     try:
         scanned_at = item.get('scanned_at', '')
         if not scanned_at:
@@ -622,12 +745,6 @@ def _is_deep_data_valid(item: dict) -> bool:
 
 
 def _auto_watch_from_deep(strong_items: list) -> list:
-    """
-    DEEP RS 강세 코인을 Watch에 자동 등록
-    - 이미 Watch/Active에 있는 종목은 스킵
-    - analyze_ticker로 현재 상태 재확인 후 등록
-    - 반환값: 실제 등록된 Watch 아이템 리스트
-    """
     watches        = load_watch_list()
     actives        = load_active_list()
     watch_tickers  = {w['ticker'] for w in watches}
@@ -638,29 +755,22 @@ def _auto_watch_from_deep(strong_items: list) -> list:
         ticker = deep_item.get('ticker', '')
         market = f'KRW-{ticker}'
 
-        # 이미 등록된 종목 스킵
         if ticker in watch_tickers or ticker in active_tickers:
             log.info(f'  ⏭️ {ticker} 이미 Watch/Active에 존재 - 스킵')
             continue
 
         try:
-            # 현재 상태 분석
             res = analyze_ticker(market)
             if not res:
                 log.warning(f'  ⚠️ {ticker} 분석 실패 - 스킵')
                 continue
-
-            # C등급 이하 제외
             if res.get('grade') not in ALLOWED_GRADES:
                 log.info(f'  ⏭️ {ticker} 등급 {res.get("grade")} - 스킵')
                 continue
-
-            # any_buy_no 체크
             if res.get('any_buy_no'):
                 log.info(f'  ⏭️ {ticker} BUY_NO - 스킵')
                 continue
 
-            # Watch 아이템 생성 (reg_from = 'deep_rebound' 태그)
             item = _make_watch_item(res, reg_from='deep_rebound')
             watches.append(item)
             watch_tickers.add(ticker)
@@ -682,18 +792,12 @@ def _auto_watch_from_deep(strong_items: list) -> list:
     return registered
 
 
-# ══════════════════════════════════════════════════════════════════
-# v3.0.8 + v3.0.9: BTC 전용 빠른 루프 (10초)
-# ══════════════════════════════════════════════════════════════════
 def btc_fast_loop():
     log.info('⚡ btc_fast_loop 시작 (10초 주기, 5m/15m + 반등감지)')
-
-    # 이전 사이클 추적용 (반등 감지를 위해 필요)
     _prev_h1_cycle = None
 
     while True:
         try:
-            # ── 5분봉 / 15분봉 StochRSI 계산 ──────────────────────
             closes_m15 = get_candles('KRW-BTC', 'minutes/15', count=50)
             closes_m5  = get_candles('KRW-BTC', 'minutes/5',  count=50)
 
@@ -701,20 +805,19 @@ def btc_fast_loop():
             m5_gc,  m5_cycle  = False, 'RISING'
 
             if len(closes_m15) >= 30:
-                r15      = _mtf.calc_stoch_rsi(closes_m15, 'short')
+                r15       = _mtf.calc_stoch_rsi(closes_m15, 'short')
                 m15_cycle = r15.get('cycle', 'RISING')
                 k15, d15  = r15.get('k'), r15.get('d')
                 if k15 is not None and d15 is not None:
                     m15_gc = (k15 > d15) and (k15 <= 40)
 
             if len(closes_m5) >= 30:
-                r5      = _mtf.calc_stoch_rsi(closes_m5, 'short')
+                r5       = _mtf.calc_stoch_rsi(closes_m5, 'short')
                 m5_cycle = r5.get('cycle', 'RISING')
                 k5, d5   = r5.get('k'), r5.get('d')
                 if k5 is not None and d5 is not None:
                     m5_gc = (k5 > d5) and (k5 <= 40)
 
-            # ── state 갱신 + entry_signal 재계산 ───────────────────
             with _state_lock:
                 _scanner_state['btc_m15_cycle'] = m15_cycle
                 _scanner_state['btc_m15_gc']    = m15_gc
@@ -733,42 +836,32 @@ def btc_fast_loop():
                 )
                 _scanner_state['btc_entry_signal'] = entry_signal
 
-            # ── v3.0.9: BTC 1h 반등 감지 ───────────────────────────
-            # FALLING → BOTTOM 전환 시 DEEP RS 강세 코인 Watch 자동 등록
             if (
                 _prev_h1_cycle == 'FALLING' and
                 curr_h1_cycle  == 'BOTTOM'
             ):
                 log.info('🔄 BTC 1h FALLING→BOTTOM 전환 감지!')
-
-                deep_list = load_deep_list()
-
-                # 유효 시간(2h) 이내 데이터만 + S/A 등급만
+                deep_list    = load_deep_list()
                 valid_strong = [
                     d for d in deep_list
                     if d.get('deep_grade') in ('S', 'A')
                     and _is_deep_data_valid(d)
                 ]
-
                 if valid_strong:
                     log.info(f'  RS 강세 유효 종목: {len(valid_strong)}개 → Watch 자동 등록 시작')
                     registered = _auto_watch_from_deep(valid_strong)
-
                     if registered:
                         add_event('⚡', f'BTC 반등! {len(registered)}개 Watch 자동 등록')
                         send_telegram(_fmt_rebound_msg(valid_strong, registered))
-
                         with _state_lock:
                             _scanner_state['btc_rebound_detected'] = True
                             _scanner_state['btc_rebound_at']       = _now_iso()
                     else:
                         add_event('⚡', 'BTC 반등 감지 (등록 가능 종목 없음)')
                 else:
-                    # DEEP 데이터 없거나 만료 시 로그만
                     log.info('  유효한 DEEP RS 데이터 없음 (만료 또는 미스캔)')
                     add_event('⚡', 'BTC 반등 감지 (DEEP RS 데이터 없음)')
 
-            # 이전 사이클 업데이트
             _prev_h1_cycle = curr_h1_cycle
 
         except Exception as e:
@@ -777,21 +870,16 @@ def btc_fast_loop():
         time.sleep(10)
 
 
-# ══════════════════════════════════════════════════════════════════
-# v3.0.7: DEEP 스캔 - 다중 시간대 RS
-# ══════════════════════════════════════════════════════════════════
 def run_deep_scan(btc_info: dict):
     with _state_lock:
         _scanner_state['deep_scanning'] = True
     add_event('🔥', 'DEEP 스캔 시작')
     try:
-        tickers = get_krw_tickers()
-
+        tickers     = get_krw_tickers()
         btc_pct_1h  = btc_info.get('pct_1h')  or 0
         btc_pct_4h  = btc_info.get('pct_4h')  or 0
         btc_pct_24h = btc_info.get('pct_24h') or 0
-
-        results = []
+        results     = []
 
         def _check(market):
             try:
@@ -805,14 +893,10 @@ def run_deep_scan(btc_info: dict):
                 coin_pct_24h = get_price_change_pct(market, 'days', 1)
 
                 rs_info = _mtf.calc_relative_strength(
-                    coin_pct_1h  = coin_pct_1h,
-                    btc_pct_1h   = btc_pct_1h,
-                    coin_pct_4h  = coin_pct_4h,
-                    btc_pct_4h   = btc_pct_4h,
-                    coin_pct_24h = coin_pct_24h,
-                    btc_pct_24h  = btc_pct_24h,
+                    coin_pct_1h=coin_pct_1h, btc_pct_1h=btc_pct_1h,
+                    coin_pct_4h=coin_pct_4h, btc_pct_4h=btc_pct_4h,
+                    coin_pct_24h=coin_pct_24h, btc_pct_24h=btc_pct_24h,
                 )
-
                 if rs_info['grade'] in ('-', 'C'):
                     return None
 
@@ -859,11 +943,10 @@ def run_deep_scan(btc_info: dict):
         save_deep_list(top)
 
         with _state_lock:
-            _scanner_state['last_deep_scan'] = _now_iso()
-            _scanner_state['deep_count']     = len(top)
-            _scanner_state['deep_scanning']  = False
-            # 반등 감지 플래그 초기화 (새 DEEP 스캔 후 리셋)
-            _scanner_state['btc_rebound_detected'] = False
+            _scanner_state['last_deep_scan']       = _now_iso()
+            _scanner_state['deep_count']            = len(top)
+            _scanner_state['deep_scanning']         = False
+            _scanner_state['btc_rebound_detected']  = False
 
         add_event('🔥', f'DEEP 스캔 완료 {len(top)}개 감지')
         alert = [r for r in top if r['deep_grade'] in ('S','A')]
@@ -1011,11 +1094,12 @@ def _run_full_scan():
                 ticker not in watch_tickers and
                 ticker not in active_tickers
             ):
-                item = _make_watch_item(res, reg_from='scan')
+                item     = _make_watch_item(res, reg_from='scan')
                 new_watches.append(item)
                 deep_tag = f' 🔥RS-{res["deep_rs_grade"]}' if res.get('deep_rs_grade','-') != '-' else ''
-                log.info(f'  📋 Watch: {ticker} [{res["grade"]}] {res["score"]}점{deep_tag}')
-                add_event('📋', f'{ticker} Watch 등록 [{res["grade"]}] {res["score"]}점{deep_tag}')
+                div_tag  = f' 🔼BULL' if res.get('bull_div') else (f' ↗HID' if res.get('hidden_bull') else '')
+                log.info(f'  📋 Watch: {ticker} [{res["grade"]}] {res["score"]}점{deep_tag}{div_tag}')
+                add_event('📋', f'{ticker} Watch 등록 [{res["grade"]}] {res["score"]}점{deep_tag}{div_tag}')
                 send_telegram(_fmt_watch_msg(item))
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
@@ -1111,6 +1195,15 @@ def _run_watch_rescan():
                 add_event('⚫', f'{ticker} 사이클 악화 → Watch 해제')
                 continue
 
+            # ── v3.1.0: 하락 다이버전스 + PEAK → Watch 해제 ────────
+            if (
+                res.get('bear_div') and
+                res.get('div_strength') == 'STRONG' and
+                res.get('d_short_cycle') == 'PEAK'
+            ):
+                add_event('🔽', f'{ticker} 하락다이버전스+PEAK → Watch 해제')
+                continue
+
             if (
                 res.get('auto_entry') and
                 res.get('grade') in ALLOWED_GRADES and
@@ -1133,6 +1226,11 @@ def _run_watch_rescan():
                         'h4_cycle':      res.get('h4_cycle',       'RISING'),
                         'h1_cycle':      res.get('h1_cycle',       'RISING'),
                         'deep_rs_grade': res.get('deep_rs_grade', '-'),
+                        'bull_div':      res.get('bull_div',    False),
+                        'bear_div':      res.get('bear_div',    False),
+                        'hidden_bull':   res.get('hidden_bull', False),
+                        'div_type':      res.get('div_type',    'NONE'),
+                        'div_strength':  res.get('div_strength','NONE'),
                     }}
                     active = _make_active_item(updated_item, price, 'auto')
                     new_actives.append(active)
@@ -1160,6 +1258,14 @@ def _run_watch_rescan():
                 'current_price': price or item.get('current_price'),
                 'price_change':  item.get('price_change', 0.0),
                 'deep_rs_grade': res.get('deep_rs_grade', '-'),
+                'bull_div':      res.get('bull_div',    False),
+                'bear_div':      res.get('bear_div',    False),
+                'hidden_bull':   res.get('hidden_bull', False),
+                'div_type':      res.get('div_type',    'NONE'),
+                'div_strength':  res.get('div_strength','NONE'),
+                'div_daily':     res.get('div_daily',   'NONE'),
+                'div_h4':        res.get('div_h4',      'NONE'),
+                'div_h1':        res.get('div_h1',      'NONE'),
             })
             sh = item_u.get('score_history', [])
             sh.append(res['score'])
@@ -1243,7 +1349,7 @@ def active_price_loop():
                         entry = item.get('entry_price', price)
                         item['current_price'] = price
                         item['pnl_pct'] = round(
-                            (price - entry) / entry * 100, 2
+                            (price-entry)/entry*100, 2
                         ) if entry > 0 else 0.0
                         item['max_price'] = max(item.get('max_price', price), price)
                         item['min_price'] = min(item.get('min_price', price), price)
@@ -1332,10 +1438,10 @@ def get_scanner_state() -> dict:
 
 print(f'✅ Scanner {VERSION} 로드 완료')
 print(f'   MTF: {MTF_VERSION}')
+print(f'   다이버전스 탐지: BULL / BEAR / HIDDEN_BULL ✅')
+print(f'   하락다이버전스 + PEAK → Watch 자동 해제 ✅')
 print(f'   BTC 전용 빠른 루프: 5분봉/15분봉 10초 갱신 ✅')
 print(f'   ⚡ GOOD+ 신호: 1h바닥 + 15m GC + 5m GC ✅')
 print(f'   🔄 BTC 반등 감지: FALLING→BOTTOM + DEEP RS 자동 Watch 등록 ✅')
-print(f'   📡 DEEP 데이터 유효시간: {DEEP_REBOUND_VALID_HOURS}시간 ✅')
 print(f'   DEEP RS: 1h(50%) + 4h(30%) + 24h(20%) 가중 평균 ✅')
 print(f'   Active 30초 가격 업데이트 ✅')
-print(f'   Watch 자동해제: 만료/하락{WATCH_DROP_PCT}%/상승+{WATCH_RISE_PCT}%/사이클악화 ✅')
