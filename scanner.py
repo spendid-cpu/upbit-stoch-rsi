@@ -1,8 +1,9 @@
 """
-scanner.py v3.0.7
+scanner.py v3.0.8
 변경사항:
-- v3.0.6: Active 30초 루프, DEEP RS 보너스
-- v3.0.7: DEEP 스캔 다중 시간대 RS (1h/4h/24h) 적용
+- v3.0.8: BTC 전용 10초 루프 (5분봉/15분봉 사이클 + GC)
+           btc_m5_cycle, btc_m15_cycle, btc_m5_gc, btc_m15_gc 추가
+           GOOD+ 신호 (1h바닥 + 15m GC + 5m GC)
 """
 
 import os
@@ -19,7 +20,7 @@ import requests
 import mtf_setup as _mtf
 from mtf_setup import VERSION as MTF_VERSION
 
-VERSION = 'v3.0.7'
+VERSION = 'v3.0.8'
 PORT    = int(os.environ.get('PORT', '8080'))
 KST     = timezone(timedelta(hours=9))
 
@@ -116,6 +117,12 @@ _scanner_state = {
     'btc_d_mid_cycle':     None,
     'btc_h4_cycle':        None,
     'btc_h1_cycle':        None,
+    # ── v3.0.8 신규 ──────────────────────────
+    'btc_m15_cycle':       None,
+    'btc_m15_gc':          False,
+    'btc_m5_cycle':        None,
+    'btc_m5_gc':           False,
+    # ─────────────────────────────────────────
     'btc_entry_signal':    None,
     'total_trades':        0,
     'win_trades':          0,
@@ -168,7 +175,16 @@ def _is_expired(item: dict) -> bool:
         return False
 
 
-def _calc_btc_entry_signal(d_short, d_mid, h4, h1) -> str:
+def _calc_btc_entry_signal(
+    d_short, d_mid, h4, h1,
+    m15_gc=False, m5_gc=False
+) -> str:
+    """
+    BLOCK  : 단기+중기 모두 PEAK/FALLING
+    CAUTION: 단기 PEAK/FALLING 또는 4h/1h 이상
+    GOOD   : 단기+중기 BOTTOM/RISING
+    GOOD+  : GOOD + 15분 GC + 5분 GC (최적 진입 타이밍)
+    """
     bad = ('PEAK', 'FALLING')
     if d_short in bad and d_mid in bad:
         return 'BLOCK'
@@ -177,6 +193,8 @@ def _calc_btc_entry_signal(d_short, d_mid, h4, h1) -> str:
     if h4 in bad or h1 in bad:
         return 'CAUTION'
     if d_short in ('BOTTOM', 'RISING') and d_mid in ('BOTTOM', 'RISING'):
+        if m15_gc and m5_gc:
+            return 'GOOD+'
         return 'GOOD'
     return 'CAUTION'
 
@@ -284,7 +302,16 @@ def get_btc_info() -> dict:
     d_mid_cycle   = btc_mtf['daily']['mid'].get('cycle',   'RISING')
     h4_cycle      = btc_mtf['h4']['short'].get('cycle',    'RISING')
     h1_cycle      = btc_mtf['h1']['short'].get('cycle',    'RISING')
-    entry_signal  = _calc_btc_entry_signal(d_short_cycle, d_mid_cycle, h4_cycle, h1_cycle)
+
+    # m15/m5는 btc_fast_loop 에서 갱신하므로 state에서 읽어옴
+    with _state_lock:
+        m15_gc = _scanner_state.get('btc_m15_gc', False)
+        m5_gc  = _scanner_state.get('btc_m5_gc',  False)
+
+    entry_signal = _calc_btc_entry_signal(
+        d_short_cycle, d_mid_cycle, h4_cycle, h1_cycle,
+        m15_gc=m15_gc, m5_gc=m5_gc
+    )
 
     def to_usd(krw):
         return round(krw/usdt_rate,1) if krw and usdt_rate else None
@@ -303,7 +330,7 @@ def get_btc_info() -> dict:
         'weekly_pct':       ma20_info.get('weekly_pct'),
         'pct_1h':           pct_1h,
         'pct_4h':           pct_4h,
-        'pct_24h':          pct_24h,   # v3.0.7 추가
+        'pct_24h':          pct_24h,
         'd_short_cycle':    d_short_cycle,
         'd_mid_cycle':      d_mid_cycle,
         'h4_cycle':         h4_cycle,
@@ -564,6 +591,58 @@ def close_active_item(item: dict, reason: str, close_price: float) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════
+# v3.0.8: BTC 전용 빠른 루프 (10초, 5분봉/15분봉)
+# ══════════════════════════════════════════════════════════════════
+def btc_fast_loop():
+    log.info('⚡ btc_fast_loop 시작 (10초 주기, 5m/15m)')
+    while True:
+        try:
+            # 5분봉 / 15분봉 캔들 각 50개
+            closes_m15 = get_candles('KRW-BTC', 'minutes/15', count=50)
+            closes_m5  = get_candles('KRW-BTC', 'minutes/5',  count=50)
+
+            m15_gc, m15_cycle = False, 'RISING'
+            m5_gc,  m5_cycle  = False, 'RISING'
+
+            if len(closes_m15) >= 30:
+                r15 = _mtf.calc_stoch_rsi(closes_m15, 'short')
+                m15_cycle = r15.get('cycle', 'RISING')
+                # GC: k가 d를 상향 돌파하고 k <= 40 (과매도 탈출 구간)
+                k15, d15 = r15.get('k'), r15.get('d')
+                if k15 is not None and d15 is not None:
+                    m15_gc = (k15 > d15) and (k15 <= 40)
+
+            if len(closes_m5) >= 30:
+                r5 = _mtf.calc_stoch_rsi(closes_m5, 'short')
+                m5_cycle = r5.get('cycle', 'RISING')
+                k5, d5 = r5.get('k'), r5.get('d')
+                if k5 is not None and d5 is not None:
+                    m5_gc = (k5 > d5) and (k5 <= 40)
+
+            # state 갱신 + entry_signal 재계산
+            with _state_lock:
+                _scanner_state['btc_m15_cycle'] = m15_cycle
+                _scanner_state['btc_m15_gc']    = m15_gc
+                _scanner_state['btc_m5_cycle']  = m5_cycle
+                _scanner_state['btc_m5_gc']     = m5_gc
+
+                # 기존 1h/4h/daily 사이클로 신호 재계산
+                entry_signal = _calc_btc_entry_signal(
+                    _scanner_state.get('btc_d_short_cycle', 'RISING'),
+                    _scanner_state.get('btc_d_mid_cycle',   'RISING'),
+                    _scanner_state.get('btc_h4_cycle',      'RISING'),
+                    _scanner_state.get('btc_h1_cycle',      'RISING'),
+                    m15_gc=m15_gc,
+                    m5_gc=m5_gc,
+                )
+                _scanner_state['btc_entry_signal'] = entry_signal
+
+        except Exception as e:
+            log.error(f'btc_fast_loop: {e}')
+        time.sleep(10)
+
+
+# ══════════════════════════════════════════════════════════════════
 # v3.0.7: DEEP 스캔 - 다중 시간대 RS
 # ══════════════════════════════════════════════════════════════════
 def run_deep_scan(btc_info: dict):
@@ -573,7 +652,6 @@ def run_deep_scan(btc_info: dict):
     try:
         tickers = get_krw_tickers()
 
-        # BTC 각 시간대 변화율
         btc_pct_1h  = btc_info.get('pct_1h')  or 0
         btc_pct_4h  = btc_info.get('pct_4h')  or 0
         btc_pct_24h = btc_info.get('pct_24h') or 0
@@ -583,19 +661,14 @@ def run_deep_scan(btc_info: dict):
         def _check(market):
             try:
                 time.sleep(REQUEST_DELAY)
-
-                # 코인 각 시간대 변화율
                 coin_pct_1h = get_price_change_pct(market, 'minutes/60',  1)
                 if coin_pct_1h is None:
                     return None
                 time.sleep(REQUEST_DELAY)
-
                 coin_pct_4h  = get_price_change_pct(market, 'minutes/240', 1)
                 time.sleep(REQUEST_DELAY)
-
                 coin_pct_24h = get_price_change_pct(market, 'days', 1)
 
-                # 다중 시간대 RS 계산
                 rs_info = _mtf.calc_relative_strength(
                     coin_pct_1h  = coin_pct_1h,
                     btc_pct_1h   = btc_pct_1h,
@@ -605,11 +678,9 @@ def run_deep_scan(btc_info: dict):
                     btc_pct_24h  = btc_pct_24h,
                 )
 
-                # C등급 이하 제외
                 if rs_info['grade'] in ('-', 'C'):
                     return None
 
-                # 일봉 과매수 필터
                 time.sleep(REQUEST_DELAY)
                 daily = get_candles(market, 'days', count=30)
                 if daily:
@@ -906,7 +977,7 @@ def _run_watch_rescan():
             if (
                 res.get('auto_entry') and
                 res.get('grade') in ALLOWED_GRADES and
-                btc_signal != 'BLOCK'
+                btc_signal not in ('BLOCK',)
             ):
                 if price:
                     updated_item = {**item, **{
@@ -1124,6 +1195,8 @@ def get_scanner_state() -> dict:
 
 print(f'✅ Scanner {VERSION} 로드 완료')
 print(f'   MTF: {MTF_VERSION}')
+print(f'   BTC 전용 빠른 루프: 5분봉/15분봉 10초 갱신 ✅')
+print(f'   GOOD+ 신호: 1h바닥 + 15m GC + 5m GC ✅')
 print(f'   DEEP RS: 1h(50%) + 4h(30%) + 24h(20%) 가중 평균 ✅')
 print(f'   Active 30초 가격 업데이트 ✅')
 print(f'   Watch 자동해제: 만료/하락{WATCH_DROP_PCT}%/상승+{WATCH_RISE_PCT}%/사이클악화 ✅')
