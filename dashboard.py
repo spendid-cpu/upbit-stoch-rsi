@@ -1,10 +1,11 @@
 """
-dashboard.py v3.1.2
+dashboard.py v3.1.3
 변경사항:
 - v3.1.1: 모바일 레이아웃, C등급 제외, API 함수명 수정
 - v3.1.2: BTC 사이클 헤더 고정 표시
            진입신호등 (🟢GOOD / 🟡CAUTION / 🔴BLOCK) 추가
            BLOCK 시 Watch 테이블 상단 경고 배너 표시
+- v3.1.3: Watch 등록시각 컬럼 추가 (added_at 기반, KST MM-DD HH:MM)
 """
 
 import threading
@@ -12,7 +13,7 @@ import traceback
 from flask import Flask, jsonify, request, render_template_string
 import scanner as sc
 
-DASHBOARD_VERSION = 'v3.1.2'
+DASHBOARD_VERSION = 'v3.1.3'
 app = Flask(__name__)
 
 TEMPLATE = """
@@ -35,7 +36,6 @@ TEMPLATE = """
   .header h1 { font-size: 15px; color: #58a6ff; white-space: nowrap; }
   .version-badge { background: #21262d; border: 1px solid #30363d; border-radius: 4px; padding: 2px 8px; font-size: 11px; color: #8b949e; }
 
-  /* BTC 가격/MA */
   .btc-info { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .btc-price { color: #f0883e; font-weight: bold; font-size: 14px; }
   .btc-signal { padding: 2px 7px; border-radius: 4px; font-size: 11px; }
@@ -43,14 +43,12 @@ TEMPLATE = """
   .btc-signal.BELOW   { background: #4d1c1c; color: #f85149; }
   .btc-signal.UNKNOWN { background: #21262d; color: #8b949e; }
 
-  /* BTC 사이클 행 */
   .btc-cycles {
     display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
     margin-left: auto;
   }
   .btc-cycle-label { font-size: 11px; color: #8b949e; margin-right: 2px; }
 
-  /* 진입 신호등 */
   .entry-signal {
     padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: bold;
     white-space: nowrap;
@@ -69,7 +67,7 @@ TEMPLATE = """
   .status-dot.active { background: #3fb950; animation: pulse 1.5s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
-  /* ── BTC BLOCK 경고 배너 ── */
+  /* ── BLOCK 경고 배너 ── */
   .block-banner {
     display: none;
     background: #4d1c1c; border: 1px solid #f85149;
@@ -124,6 +122,9 @@ TEMPLATE = """
   .price-down { color: #f85149; }
   .price-flat { color: #8b949e; }
 
+  /* 등록시각 셀 */
+  .reg-at { font-size: 11px; color: #8b949e; white-space: nowrap; }
+
   .cycle-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; }
   .cycle-BOTTOM  { background: #1a4731; color: #3fb950; }
   .cycle-RISING  { background: #1c2d4a; color: #58a6ff; }
@@ -164,7 +165,6 @@ TEMPLATE = """
   <h1>📊 Upbit StochRSI Scanner</h1>
   <span class="version-badge">{{ version }}</span>
 
-  <!-- BTC 가격 / MA -->
   <div class="btc-info">
     <span class="btc-price" id="btcPrice">로딩중...</span>
     <span id="btcDailySignal"  class="btc-signal UNKNOWN">Daily -</span>
@@ -172,7 +172,6 @@ TEMPLATE = """
     <span id="btcMa" style="font-size:11px;color:#8b949e;"></span>
   </div>
 
-  <!-- BTC 사이클 + 진입신호 -->
   <div class="btc-cycles">
     <span class="btc-cycle-label">BTC</span>
     <span id="btcDShort" class="cycle-badge cycle-RISING">일단기 -</span>
@@ -232,11 +231,21 @@ TEMPLATE = """
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>종목</th><th>등급</th><th>점수</th><th>등록가/현재가</th>
-            <th>단기사이클</th><th>중기사이클</th><th>4h</th><th>1h</th>
-            <th>GC</th><th>거래량</th><th>바닥일</th><th>관리</th>
+            <th>종목</th>
+            <th>등급</th>
+            <th>점수</th>
+            <th>등록가/현재가</th>
+            <th>등록시각</th>
+            <th>단기사이클</th>
+            <th>중기사이클</th>
+            <th>4h</th>
+            <th>1h</th>
+            <th>GC</th>
+            <th>거래량</th>
+            <th>바닥일</th>
+            <th>관리</th>
           </tr></thead>
-          <tbody id="watchBody"><tr><td colspan="12" class="loading">로딩중...</td></tr></tbody>
+          <tbody id="watchBody"><tr><td colspan="13" class="loading">로딩중...</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -288,6 +297,13 @@ function switchTab(tab) {
     document.getElementById('tab'+t.charAt(0).toUpperCase()+t.slice(1))
             .classList.toggle('active', t===tab);
   });
+}
+
+// ── 포맷 유틸 ─────────────────────────────────────────────────────
+function fmtRegAt(iso) {
+  if (!iso) return '-';
+  // "2026-05-27T11:51:00" → "05-27 11:51"
+  return iso.slice(5, 16).replace('T', ' ');
 }
 
 function fmtPrice(p) {
@@ -358,7 +374,6 @@ function updateBtcCycles(s) {
     el.textContent = labels[id]+' '+(cycleLabel[cycle]||cycle);
   });
 
-  // 진입 신호등
   const sig = s.btc_entry_signal || 'CAUTION';
   const sigEl = document.getElementById('entrySignal');
   const sigMap = {
@@ -370,15 +385,15 @@ function updateBtcCycles(s) {
   sigEl.className   = `entry-signal ${sm.cls}`;
   sigEl.textContent = sm.text;
 
-  // BLOCK 배너
   const banner = document.getElementById('blockBanner');
   if (banner) banner.style.display = sig==='BLOCK' ? 'block' : 'none';
 }
 
+// ── Watch 렌더링 ─────────────────────────────────────────────────
 function renderWatch(items) {
   const tbody = document.getElementById('watchBody');
   if (!items||!items.length) {
-    tbody.innerHTML='<tr><td colspan="12" class="empty">Watch 종목 없음</td></tr>';
+    tbody.innerHTML='<tr><td colspan="13" class="empty">Watch 종목 없음</td></tr>';
     return;
   }
   items=[...items].filter(w=>['S','A','B'].includes(w.grade)).sort((a,b)=>b.score-a.score);
@@ -389,6 +404,7 @@ function renderWatch(items) {
       <td>${gradeHtml(w.grade)}</td>
       <td>${scoreBarHtml(w.score)}</td>
       <td>${priceCell(w.reg_price,w.current_price,w.price_change)}</td>
+      <td><span class="reg-at">${fmtRegAt(w.added_at)}</span></td>
       <td>${cycleBadge(w.d_short_cycle)}</td>
       <td>${cycleBadge(w.d_mid_cycle)}</td>
       <td>${cycleBadge(w.h4_cycle)}</td>
@@ -404,6 +420,7 @@ function renderWatch(items) {
   }).join('');
 }
 
+// ── Active 렌더링 ────────────────────────────────────────────────
 function renderActive(items) {
   const tbody=document.getElementById('activeBody');
   if (!items||!items.length) {
@@ -422,12 +439,13 @@ function renderActive(items) {
       <td class="price-up">${fmtPrice(a.tp_price)}</td>
       <td class="price-down">${fmtPrice(a.sl_price)}</td>
       <td>${cycleBadge(a.d_short_cycle)}</td>
-      <td>${(a.entry_at||'-').slice(5,16).replace('T',' ')}</td>
+      <td>${fmtRegAt(a.entry_at)}</td>
       <td><button class="btn btn-danger btn-sm" onclick="closeActive('${a.market}')">청산</button></td>
     </tr>`;
   }).join('');
 }
 
+// ── History 렌더링 ───────────────────────────────────────────────
 function renderHistory(items) {
   const tbody=document.getElementById('historyBody');
   if (!items||!items.length) {
@@ -445,11 +463,12 @@ function renderHistory(items) {
       <td>${fmtPrice(h.close_price)}</td>
       <td class="${pc}">${fmtPct(pnl)}</td>
       <td>${h.close_reason||'-'}</td>
-      <td>${(h.close_at||'-').slice(5,16).replace('T',' ')}</td>
+      <td>${fmtRegAt(h.close_at)}</td>
     </tr>`;
   }).join('');
 }
 
+// ── 이벤트 렌더링 ────────────────────────────────────────────────
 function renderEvents(events) {
   const el=document.getElementById('eventList');
   document.getElementById('eventCount').textContent=events.length;
@@ -464,10 +483,10 @@ function renderEvents(events) {
   }).join('');
 }
 
+// ── 상태 업데이트 ────────────────────────────────────────────────
 function updateState(data) {
   const s=data.state||{};
 
-  // BTC 가격
   const btcKrw=s.btc_price||0;
   const usdRate=s.usdt_rate||1450;
   document.getElementById('btcPrice').textContent=
@@ -484,10 +503,8 @@ function updateState(data) {
   document.getElementById('btcMa').textContent=
     '일MA20:'+dMa.toLocaleString('ko-KR')+' / 주MA20:'+wMa.toLocaleString('ko-KR');
 
-  // BTC 사이클 + 신호등
   updateBtcCycles(s);
 
-  // 상태바
   const running=s.running||s.watch_rescanning||s.price_checking;
   document.getElementById('scanDot').className='status-dot'+(running?' active':'');
   document.getElementById('scanStatus').textContent=running?'스캔 중...':'대기 중';
@@ -495,7 +512,6 @@ function updateState(data) {
   document.getElementById('totalSymbols').textContent=s.scan_count||0;
   document.getElementById('usdtRate').textContent=(s.usdt_rate||0).toLocaleString();
 
-  // 통계
   const watch=data.watch||[], active=data.active||[], history=data.history||[];
   document.getElementById('watchCount').textContent=watch.filter(w=>['S','A','B'].includes(w.grade)).length;
   document.getElementById('activeCount').textContent=active.length;
@@ -509,6 +525,7 @@ function updateState(data) {
   renderHistory(history);
 }
 
+// ── API 호출 ─────────────────────────────────────────────────────
 async function fetchState() {
   try {
     const r=await fetch('/api/state');
@@ -640,6 +657,7 @@ if __name__ == '__main__':
     print(f'   MTF: {sc.MTF_VERSION}')
     print(f'   BTC 사이클 헤더 고정 표시 ✅')
     print(f'   진입신호: 🟢GOOD / 🟡CAUTION / 🔴BLOCK ✅')
+    print(f'   Watch 등록시각 컬럼 추가 (added_at) ✅')
     print(f'🚀 http://0.0.0.0:{sc.PORT}')
     start_background_threads()
     app.run(host='0.0.0.0', port=sc.PORT, debug=False)
