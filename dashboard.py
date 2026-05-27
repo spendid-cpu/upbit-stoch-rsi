@@ -1,6 +1,6 @@
 """
 dashboard.py v3.1.6
-변경사항:
+Changes:
 - v3.1.4: 🔥RS 배지, 경과일/D-N, active_price_loop
 - v3.1.5: BTC 5분봉/15분봉 사이클 배지, ⚡ GOOD+ 신호, /api/btc 엔드포인트
 - v3.1.6: 다이버전스 배지 추가 (🔼BULL DIV / 🔽BEAR DIV / ↗HID BULL)
