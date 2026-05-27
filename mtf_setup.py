@@ -1,17 +1,15 @@
 """
-mtf_setup.py v3.0.2
+mtf_setup.py v3.0.3
 변경사항:
 - v3.0.1: 점수 기반 등급 일치, 주봉 MA20, BTC 일봉/주봉 MA20 동시 반환
 - v3.0.2: 사이클 감지 추가 (BOTTOM/RISING/PEAK/FALLING)
-           k_prev2 추가, calc_stoch_rsi cycle 반환
-           _calc_score 사이클 페널티 추가
+- v3.0.3: DEEP 상대강도 보너스 점수 추가 (S:+15 / A:+10 / B:+5)
 """
 
 import numpy as np
 
-VERSION = 'v3.0.2'
+VERSION = 'v3.0.3'
 
-# ── 파라미터 정의 ─────────────────────────────────────────────
 PARAMS = {
     'short': {'rsi':  5, 'stoch':  5, 'k_smooth':  3, 'd_smooth':  3},
     'mid':   {'rsi': 10, 'stoch': 10, 'k_smooth':  6, 'd_smooth':  6},
@@ -21,10 +19,6 @@ PARAMS = {
 OVERSOLD   = 20.0
 OVERBOUGHT = 80.0
 
-
-# ══════════════════════════════════════════════════════════════
-# 핵심 계산 함수
-# ══════════════════════════════════════════════════════════════
 
 def _rsi(closes: np.ndarray, period: int) -> np.ndarray:
     if len(closes) < period + 1:
@@ -82,18 +76,7 @@ def _sma(arr: np.ndarray, period: int) -> np.ndarray:
     return result
 
 
-# ══════════════════════════════════════════════════════════════
-# 사이클 감지 (v3.0.2 추가)
-# ══════════════════════════════════════════════════════════════
-
 def _detect_cycle(k_now: float, k_prev1: float, k_prev2: float) -> str:
-    """
-    K값 3개로 사이클 위치 판단
-    BOTTOM  : K≤20, 올라오는 중 (최적 진입)
-    RISING  : K 상승 중
-    PEAK    : 고점에서 꺾임 시작
-    FALLING : 하락 중
-    """
     slope_now  = k_now   - k_prev1
     slope_prev = k_prev1 - k_prev2
 
@@ -107,10 +90,6 @@ def _detect_cycle(k_now: float, k_prev1: float, k_prev2: float) -> str:
         return 'FALLING'
     return 'RISING'
 
-
-# ══════════════════════════════════════════════════════════════
-# StochRSI 계산
-# ══════════════════════════════════════════════════════════════
 
 def calc_stoch_rsi(closes: list, term: str) -> dict:
     p          = PARAMS[term]
@@ -132,10 +111,9 @@ def calc_stoch_rsi(closes: list, term: str) -> dict:
 
     k       = round(float(k_vals[-1]), 2)
     k_prev  = round(float(k_vals[-2]), 2)
-    k_prev2 = round(float(k_vals[-3]), 2)  # v3.0.2 추가
-
-    d      = round(float(d_vals[-1]), 2)
-    d_prev = round(float(d_vals[-2]), 2)
+    k_prev2 = round(float(k_vals[-3]), 2)
+    d       = round(float(d_vals[-1]), 2)
+    d_prev  = round(float(d_vals[-2]), 2)
 
     golden_cross = (k_prev <= d_prev) and (k > d)
     dead_cross   = (k_prev >= d_prev) and (k < d)
@@ -148,7 +126,7 @@ def calc_stoch_rsi(closes: list, term: str) -> dict:
         zone = 'neutral'
 
     signal = _get_signal(k, d, k_prev, d_prev, golden_cross, dead_cross, zone)
-    cycle  = _detect_cycle(k, k_prev, k_prev2)  # v3.0.2 추가
+    cycle  = _detect_cycle(k, k_prev, k_prev2)
 
     return {
         'k':            k,
@@ -159,7 +137,7 @@ def calc_stoch_rsi(closes: list, term: str) -> dict:
         'dead_cross':   dead_cross,
         'zone':         zone,
         'signal':       signal,
-        'cycle':        cycle,   # v3.0.2 추가
+        'cycle':        cycle,
     }
 
 
@@ -181,13 +159,9 @@ def _empty_result() -> dict:
         'k_prev': None, 'd_prev': None,
         'golden_cross': False, 'dead_cross': False,
         'zone': 'neutral', 'signal': 'NEUTRAL',
-        'cycle': 'RISING',  # v3.0.2 추가
+        'cycle': 'RISING',
     }
 
-
-# ══════════════════════════════════════════════════════════════
-# 멀티 타임프레임 통합 분석
-# ══════════════════════════════════════════════════════════════
 
 def analyze_mtf(candles: dict) -> dict:
     result = {}
@@ -264,7 +238,8 @@ def _summarize(mtf: dict) -> dict:
     }
 
 
-def _calc_score(d_long, d_mid, d_short, h4_short, h1_short) -> int:
+def _calc_score(d_long, d_mid, d_short, h4_short, h1_short,
+                deep_rs_grade: str = None) -> int:
     score = 0
 
     # 일봉 장기 과매도 (30점 + 극단 보너스 10점)
@@ -302,6 +277,11 @@ def _calc_score(d_long, d_mid, d_short, h4_short, h1_short) -> int:
     elif h1_short.get('zone') == 'oversold':
         score += 5
 
+    # ── v3.0.3: DEEP 상대강도 보너스 ─────────────────────────
+    deep_bonus = {'S': 15, 'A': 10, 'B': 5}
+    if deep_rs_grade in deep_bonus:
+        score += deep_bonus[deep_rs_grade]
+
     # 패널티
     if d_long.get('signal')   == 'BUY_NO':
         score = max(0, score - 40)
@@ -310,7 +290,7 @@ def _calc_score(d_long, d_mid, d_short, h4_short, h1_short) -> int:
     if h1_short.get('signal') == 'BUY_NO':
         score = max(0, score - 10)
 
-    # ── 사이클 페널티 (v3.0.2 추가) ──────────────────────────
+    # 사이클 페널티
     d_short_cycle = d_short.get('cycle', 'RISING')
     d_mid_cycle   = d_mid.get('cycle',   'RISING')
 
@@ -319,16 +299,11 @@ def _calc_score(d_long, d_mid, d_short, h4_short, h1_short) -> int:
     if d_mid_cycle   == 'PEAK':    score = max(0, score - 10)
     if d_mid_cycle   == 'FALLING': score = max(0, score - 15)
 
-    # 단기+중기 동시 하락 추가 페널티
     if d_short_cycle in ('PEAK', 'FALLING') and d_mid_cycle in ('PEAK', 'FALLING'):
         score = max(0, score - 15)
 
     return min(score, 100)
 
-
-# ══════════════════════════════════════════════════════════════
-# BTC MA20 (일봉 + 주봉)
-# ══════════════════════════════════════════════════════════════
 
 def btc_ma20_signal(btc_daily_closes: list, btc_weekly_closes: list = None) -> dict:
     result = {
@@ -347,14 +322,12 @@ def btc_ma20_signal(btc_daily_closes: list, btc_weekly_closes: list = None) -> d
     price = float(btc_daily_closes[-1])
     result['price'] = price
 
-    # 일봉 MA20
     daily_arr         = np.array(btc_daily_closes[-20:], dtype=float)
     daily_ma20        = float(daily_arr.mean())
     result['daily_ma20']  = round(daily_ma20, 0)
     result['daily_above'] = price > daily_ma20
     result['daily_pct']   = round((price - daily_ma20) / daily_ma20 * 100, 2)
 
-    # 주봉 MA20
     if btc_weekly_closes and len(btc_weekly_closes) >= 20:
         weekly_arr         = np.array(btc_weekly_closes[-20:], dtype=float)
         weekly_ma20        = float(weekly_arr.mean())
@@ -364,10 +337,6 @@ def btc_ma20_signal(btc_daily_closes: list, btc_weekly_closes: list = None) -> d
 
     return result
 
-
-# ══════════════════════════════════════════════════════════════
-# DEEP 상대강도
-# ══════════════════════════════════════════════════════════════
 
 def calc_relative_strength(coin_pct: float, btc_pct: float) -> dict:
     rs = round(coin_pct - btc_pct, 2)
@@ -391,8 +360,7 @@ def calc_relative_strength(coin_pct: float, btc_pct: float) -> dict:
     return {'rs': rs, 'grade': grade, 'signal': signal}
 
 
-# ── 모듈 로드 확인 ────────────────────────────────────────────
 if __name__ == '__main__' or True:
     print(f'mtf_setup.py {VERSION} 로드 완료 ✅')
     print(f'  사이클 감지: BOTTOM / RISING / PEAK / FALLING')
-    print(f'  PEAK/FALLING → 점수 페널티로 자연 필터링')
+    print(f'  DEEP RS 보너스: S+15 / A+10 / B+5')
