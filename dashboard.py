@@ -1,14 +1,9 @@
 """
-dashboard.py v3.1.0
+dashboard.py v3.1.1
 변경사항:
-- v3.0.1: BTC KRW/USD, MA20, 이벤트 패널, 상태바
-- v3.0.2: C등급 차단, 가격+변동률 컬럼
-- v3.0.3: 타이밍경고 배지 (⚠️4h K≥70 / 🔴1h K≥80)
-- v3.0.4: entry_price 보존, 등록가 대비 변동률
-- v3.0.5: 일봉 단기/중기 K 방향 화살표
-- v3.0.6: K>15 페널티 반영
-- v3.1.0: 사이클 배지 (🟢BOTTOM/🔵RISING/🔴PEAK/⚫FALLING)
-           cycle_block 종목 자동 제거 표시
+- v3.1.1: 모바일 레이아웃 수정 (이벤트 패널 덮힘 현상 수정)
+           API 함수명 scanner.py 와 일치하도록 수정
+           C등급 Watch 제외
 """
 
 import threading
@@ -16,11 +11,10 @@ import traceback
 from flask import Flask, jsonify, request, render_template_string
 import scanner as sc
 
-DASHBOARD_VERSION = 'v3.1.0'
+DASHBOARD_VERSION = 'v3.1.1'
 
 app = Flask(__name__)
 
-# ── HTML 템플릿 ───────────────────────────────────────
 TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ko">
@@ -31,27 +25,70 @@ TEMPLATE = """
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #0d1117; color: #c9d1d9; font-family: 'Segoe UI', sans-serif; font-size: 13px; }
-  .header { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+  .header {
+    background: #161b22; border-bottom: 1px solid #30363d;
+    padding: 12px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
   .header h1 { font-size: 16px; color: #58a6ff; }
   .version-badge { background: #21262d; border: 1px solid #30363d; border-radius: 4px; padding: 2px 8px; font-size: 11px; color: #8b949e; }
   .btc-info { margin-left: auto; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
   .btc-price { color: #f0883e; font-weight: bold; font-size: 15px; }
   .btc-signal { padding: 2px 8px; border-radius: 4px; font-size: 11px; }
-  .btc-signal.ABOVE { background: #1a4731; color: #3fb950; }
-  .btc-signal.BELOW { background: #4d1c1c; color: #f85149; }
+  .btc-signal.ABOVE   { background: #1a4731; color: #3fb950; }
+  .btc-signal.BELOW   { background: #4d1c1c; color: #f85149; }
   .btc-signal.UNKNOWN { background: #21262d; color: #8b949e; }
 
-  .status-bar { background: #161b22; border-bottom: 1px solid #30363d; padding: 8px 16px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .status-bar {
+    background: #161b22; border-bottom: 1px solid #30363d;
+    padding: 8px 16px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+  }
   .status-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #8b949e; }
   .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #30363d; }
   .status-dot.active { background: #3fb950; animation: pulse 1.5s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
-  .main { display: grid; grid-template-columns: 1fr 320px; gap: 0; height: calc(100vh - 100px); }
-  .left-panel { overflow-y: auto; padding: 12px; }
-  .right-panel { border-left: 1px solid #30363d; overflow-y: auto; padding: 12px; background: #0d1117; }
+  /* ── 레이아웃: 데스크탑 ── */
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 300px;
+    gap: 0;
+    height: calc(100vh - 100px);
+  }
+  .left-panel  { overflow-y: auto; padding: 12px; min-width: 0; }
+  .right-panel {
+    border-left: 1px solid #30363d;
+    overflow-y: auto; padding: 12px;
+    background: #0d1117;
+  }
 
-  .panel-title { font-size: 12px; color: #8b949e; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 8px; }
+  /* ── 레이아웃: 모바일 ── */
+  @media (max-width: 768px) {
+    .main {
+      grid-template-columns: 1fr;   /* 1열로 변경 */
+      height: auto;
+      overflow: visible;
+    }
+    .left-panel  { height: auto; overflow: visible; padding: 8px; }
+    .right-panel {
+      border-left: none;
+      border-top: 1px solid #30363d;
+      height: 300px;                /* 고정 높이로 아래 배치 */
+      overflow-y: auto;
+      padding: 8px;
+    }
+    .btc-info { margin-left: 0; font-size: 12px; }
+    .header h1 { font-size: 14px; }
+    .stat-cards { grid-template-columns: repeat(3,1fr); }
+    table { font-size: 11px; }
+    th, td { padding: 4px 6px; }
+  }
+
+  .panel-title {
+    font-size: 12px; color: #8b949e; margin-bottom: 8px;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    display: flex; align-items: center; gap: 8px;
+  }
   .count-badge { background: #21262d; border-radius: 10px; padding: 1px 7px; font-size: 11px; color: #58a6ff; }
 
   .btn { padding: 5px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 12px; transition: opacity 0.2s; }
@@ -62,74 +99,66 @@ TEMPLATE = """
   .btn-info    { background: #1f6feb; color: #fff; }
   .btn-sm { padding: 3px 8px; font-size: 11px; }
 
-  /* 테이블 */
   .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th { background: #161b22; color: #8b949e; padding: 6px 8px; text-align: left; white-space: nowrap; position: sticky; top: 0; border-bottom: 1px solid #30363d; }
+  th {
+    background: #161b22; color: #8b949e; padding: 6px 8px;
+    text-align: left; white-space: nowrap;
+    position: sticky; top: 0; border-bottom: 1px solid #30363d;
+  }
   td { padding: 6px 8px; border-bottom: 1px solid #21262d; white-space: nowrap; vertical-align: middle; }
   tr:hover td { background: #161b22; }
 
-  /* 등급 색상 */
   .grade-S { color: #f0883e; font-weight: bold; }
   .grade-A { color: #3fb950; font-weight: bold; }
   .grade-B { color: #58a6ff; }
   .grade-X { color: #f85149; }
   .grade-C { color: #8b949e; }
 
-  /* 점수바 */
   .score-bar { display: flex; align-items: center; gap: 6px; }
   .score-bar-bg { width: 60px; height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; }
   .score-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
 
-  /* 가격 셀 */
   .price-cell { display: flex; flex-direction: column; gap: 1px; }
-  .price-entry { color: #8b949e; font-size: 11px; }
+  .price-entry   { color: #8b949e; font-size: 11px; }
   .price-current { font-weight: bold; }
-  .price-change { font-size: 11px; }
+  .price-change  { font-size: 11px; }
   .price-up   { color: #3fb950; }
   .price-down { color: #f85149; }
   .price-flat { color: #8b949e; }
 
-  /* 사이클 배지 */
   .cycle-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; }
   .cycle-BOTTOM  { background: #1a4731; color: #3fb950; }
   .cycle-RISING  { background: #1c2d4a; color: #58a6ff; }
   .cycle-PEAK    { background: #4d3219; color: #f0883e; }
   .cycle-FALLING { background: #4d1c1c; color: #f85149; }
 
-  /* K/D 화살표 */
-  .kd-up   { color: #3fb950; }
-  .kd-down { color: #f85149; }
-  .kd-flat { color: #8b949e; }
-
-  /* 경고 배지 */
   .badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; margin-left: 3px; }
-  .badge-warning    { background: #3d2e0a; color: #d29922; }
-  .badge-danger     { background: #4d1c1c; color: #f85149; }
-  .badge-gc         { background: #1c2d4a; color: #79c0ff; }
-  .badge-cycle-block{ background: #4d1c1c; color: #f85149; }
+  .badge-warning     { background: #3d2e0a; color: #d29922; }
+  .badge-danger      { background: #4d1c1c; color: #f85149; }
+  .badge-gc          { background: #1c2d4a; color: #79c0ff; }
+  .badge-cycle-block { background: #4d1c1c; color: #f85149; }
 
-  /* GC 표시 */
-  .gc-mark { color: #79c0ff; font-weight: bold; }
-
-  /* 이벤트 */
   .event-item { padding: 6px 8px; border-bottom: 1px solid #21262d; font-size: 11px; }
   .event-time { color: #8b949e; font-size: 10px; }
+  .event-DEFAULT      { border-left: 3px solid #30363d; }
   .event-WATCH_ADD    { border-left: 3px solid #3fb950; }
   .event-WATCH_REMOVE { border-left: 3px solid #f85149; }
   .event-ACTIVE_ENTER { border-left: 3px solid #f0883e; }
   .event-ACTIVE_CLOSE { border-left: 3px solid #79c0ff; }
   .event-DEEP_SCAN    { border-left: 3px solid #d2992a; }
-  .event-DEFAULT      { border-left: 3px solid #30363d; }
 
-  /* 통계 카드 */
   .stat-cards { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; margin-bottom: 12px; }
   .stat-card  { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; }
   .stat-label { font-size: 10px; color: #8b949e; }
   .stat-value { font-size: 18px; font-weight: bold; color: #c9d1d9; }
 
   .toolbar { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; align-items: center; }
-  .tab-btn { padding: 4px 12px; border-radius: 4px; border: 1px solid #30363d; background: #21262d; color: #8b949e; cursor: pointer; font-size: 12px; }
+  .tab-btn {
+    padding: 4px 12px; border-radius: 4px;
+    border: 1px solid #30363d; background: #21262d;
+    color: #8b949e; cursor: pointer; font-size: 12px;
+  }
   .tab-btn.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
 
   .loading { color: #8b949e; padding: 20px; text-align: center; }
@@ -141,10 +170,10 @@ TEMPLATE = """
 <!-- 헤더 -->
 <div class="header">
   <h1>📊 Upbit StochRSI Scanner</h1>
-  <span class="version-badge" id="versionBadge">{{ version }}</span>
+  <span class="version-badge">{{ version }}</span>
   <div class="btc-info">
     <span class="btc-price" id="btcPrice">로딩중...</span>
-    <span id="btcDailySignal" class="btc-signal UNKNOWN">Daily -</span>
+    <span id="btcDailySignal"  class="btc-signal UNKNOWN">Daily -</span>
     <span id="btcWeeklySignal" class="btc-signal UNKNOWN">Weekly -</span>
     <span id="btcMa" style="font-size:11px;color:#8b949e;"></span>
   </div>
@@ -167,9 +196,8 @@ TEMPLATE = """
 
 <!-- 메인 -->
 <div class="main">
-  <!-- 왼쪽: Watch/Active 테이블 -->
+  <!-- 왼쪽 -->
   <div class="left-panel">
-    <!-- 통계 카드 -->
     <div class="stat-cards">
       <div class="stat-card">
         <div class="stat-label">Watch</div>
@@ -185,82 +213,48 @@ TEMPLATE = """
       </div>
     </div>
 
-    <!-- 탭 -->
     <div class="toolbar">
-      <button class="tab-btn active" onclick="switchTab('watch')" id="tabWatch">👁 Watch</button>
-      <button class="tab-btn" onclick="switchTab('active')" id="tabActive">⚡ Active</button>
-      <button class="tab-btn" onclick="switchTab('history')" id="tabHistory">📜 History</button>
+      <button class="tab-btn active" onclick="switchTab('watch')"   id="tabWatch">👁 Watch</button>
+      <button class="tab-btn"        onclick="switchTab('active')"  id="tabActive">⚡ Active</button>
+      <button class="tab-btn"        onclick="switchTab('history')" id="tabHistory">📜 History</button>
     </div>
 
-    <!-- Watch 테이블 -->
+    <!-- Watch -->
     <div id="watchPanel">
       <div class="table-wrap">
         <table>
-          <thead>
-            <tr>
-              <th>종목</th>
-              <th>등급</th>
-              <th>점수</th>
-              <th>등록가/현재가</th>
-              <th>단기사이클</th>
-              <th>중기사이클</th>
-              <th>4h</th>
-              <th>1h</th>
-              <th>GC</th>
-              <th>거래량</th>
-              <th>바닥일</th>
-              <th>관리</th>
-            </tr>
-          </thead>
-          <tbody id="watchBody">
-            <tr><td colspan="12" class="loading">로딩중...</td></tr>
-          </tbody>
+          <thead><tr>
+            <th>종목</th><th>등급</th><th>점수</th><th>등록가/현재가</th>
+            <th>단기사이클</th><th>중기사이클</th><th>4h</th><th>1h</th>
+            <th>GC</th><th>거래량</th><th>바닥일</th><th>관리</th>
+          </tr></thead>
+          <tbody id="watchBody"><tr><td colspan="12" class="loading">로딩중...</td></tr></tbody>
         </table>
       </div>
     </div>
 
-    <!-- Active 테이블 -->
+    <!-- Active -->
     <div id="activePanel" style="display:none;">
       <div class="table-wrap">
         <table>
-          <thead>
-            <tr>
-              <th>종목</th>
-              <th>등급</th>
-              <th>진입가/현재가</th>
-              <th>수익률</th>
-              <th>TP</th>
-              <th>SL</th>
-              <th>단기사이클</th>
-              <th>진입시각</th>
-              <th>관리</th>
-            </tr>
-          </thead>
-          <tbody id="activeBody">
-            <tr><td colspan="9" class="empty">Active 종목 없음</td></tr>
-          </tbody>
+          <thead><tr>
+            <th>종목</th><th>등급</th><th>진입가/현재가</th><th>수익률</th>
+            <th>TP</th><th>SL</th><th>단기사이클</th><th>진입시각</th><th>관리</th>
+          </tr></thead>
+          <tbody id="activeBody"><tr><td colspan="9" class="empty">Active 종목 없음</td></tr></tbody>
         </table>
       </div>
     </div>
 
-    <!-- History 테이블 -->
+    <!-- History -->
     <div id="historyPanel" style="display:none;">
       <div class="table-wrap">
         <table>
-          <thead>
-            <tr>
-              <th>종목</th>
-              <th>등급</th>
-              <th>진입가</th>
-              <th>청산가</th>
-              <th>수익률</th>
-              <th>사유</th>
-              <th>청산시각</th>
-            </tr>
-          </thead>
-          <tbody id="historyBody">
-            <tr><td colspan="7" class="empty">거래 내역 없음</td></tr>
-          </tbody>
+          <thead><tr>
+            <th>종목</th><th>등급</th><th>진입가</th><th>청산가</th>
+            <th>수익률</th><th>사유</th><th>청산시각</th>
+          </tr></thead>
+          <tbody id="historyBody"><tr><td colspan="7" class="empty">거래 내역 없음</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -279,7 +273,6 @@ TEMPLATE = """
 <script>
 let currentTab = 'watch';
 
-// ── 탭 전환 ──────────────────────────────────────────
 function switchTab(tab) {
   currentTab = tab;
   ['watch','active','history'].forEach(t => {
@@ -289,7 +282,6 @@ function switchTab(tab) {
   });
 }
 
-// ── 포맷 유틸 ─────────────────────────────────────────
 function fmtPrice(p) {
   if (!p && p !== 0) return '-';
   if (p >= 1000000) return (p/1000000).toFixed(2) + 'M';
@@ -301,103 +293,93 @@ function fmtPrice(p) {
 
 function fmtPct(v) {
   if (v == null) return '-';
-  const sign = v >= 0 ? '+' : '';
-  return sign + v.toFixed(2) + '%';
+  return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
 }
 
-// ── 등급 색상 ─────────────────────────────────────────
 function gradeHtml(g) {
   return `<span class="grade-${g}">${g}</span>`;
 }
 
-// ── 점수바 ────────────────────────────────────────────
 function scoreBarHtml(score) {
   const pct = Math.min(100, score);
   let color = '#f85149';
   if (pct >= 70) color = '#3fb950';
   else if (pct >= 55) color = '#58a6ff';
   else if (pct >= 40) color = '#d29922';
-  return `
-    <div class="score-bar">
-      <span>${score}</span>
-      <div class="score-bar-bg">
-        <div class="score-bar-fill" style="width:${pct}%;background:${color};"></div>
-      </div>
-    </div>`;
+  return `<div class="score-bar">
+    <span>${score}</span>
+    <div class="score-bar-bg">
+      <div class="score-bar-fill" style="width:${pct}%;background:${color};"></div>
+    </div>
+  </div>`;
 }
 
-// ── 가격 셀 ───────────────────────────────────────────
 function priceCell(entry, current, pct) {
   const p = pct != null ? pct : 0;
-  const cls = p > 0.1 ? 'price-up' : (p < -0.1 ? 'price-down' : 'price-flat');
+  const cls   = p > 0.1 ? 'price-up' : (p < -0.1 ? 'price-down' : 'price-flat');
   const arrow = p > 0.1 ? '▲' : (p < -0.1 ? '▼' : '–');
-  return `
-    <div class="price-cell">
-      <span class="price-entry">등록 ${fmtPrice(entry)}</span>
-      <span class="price-current">${fmtPrice(current)}</span>
-      <span class="price-change ${cls}">${arrow} ${fmtPct(p)}</span>
-    </div>`;
+  return `<div class="price-cell">
+    <span class="price-entry">등록 ${fmtPrice(entry)}</span>
+    <span class="price-current">${fmtPrice(current)}</span>
+    <span class="price-change ${cls}">${arrow} ${fmtPct(p)}</span>
+  </div>`;
 }
 
-// ── 사이클 배지 ───────────────────────────────────────
 function cycleBadge(cycle) {
   const label = { BOTTOM:'🟢바닥', RISING:'🔵상승', PEAK:'🔴고점', FALLING:'⚫하락' };
   const c = cycle || 'RISING';
   return `<span class="cycle-badge cycle-${c}">${label[c] || c}</span>`;
 }
 
-// ── GC 배지 ───────────────────────────────────────────
 function gcBadge(h4gc, h1gc, dailyGc) {
-  let badges = '';
-  if (dailyGc) badges += `<span class="badge badge-gc">일GC</span>`;
-  if (h4gc)    badges += `<span class="badge badge-gc">4hGC</span>`;
-  if (h1gc)    badges += `<span class="badge badge-gc">1hGC</span>`;
-  return badges || '-';
+  let b = '';
+  if (dailyGc) b += `<span class="badge badge-gc">일GC</span>`;
+  if (h4gc)    b += `<span class="badge badge-gc">4hGC</span>`;
+  if (h1gc)    b += `<span class="badge badge-gc">1hGC</span>`;
+  return b || '-';
 }
 
-// ── 경고 배지 ─────────────────────────────────────────
 function warningBadges(item) {
-  let badges = '';
-  if (item.timing_warning)    badges += `<span class="badge badge-warning">⚠️4h</span>`;
-  if (item.overbought_warning) badges += `<span class="badge badge-danger">🔴1h</span>`;
-  if (item.cycle_block)       badges += `<span class="badge badge-cycle-block">🚫사이클</span>`;
-  return badges;
+  let b = '';
+  if (item.timing_warning)     b += `<span class="badge badge-warning">⚠️4h</span>`;
+  if (item.overbought_warning) b += `<span class="badge badge-danger">🔴1h</span>`;
+  if (item.cycle_block)        b += `<span class="badge badge-cycle-block">🚫사이클</span>`;
+  return b;
 }
 
-// ── Watch 테이블 렌더 ─────────────────────────────────
 function renderWatch(items) {
   const tbody = document.getElementById('watchBody');
   if (!items || !items.length) {
     tbody.innerHTML = '<tr><td colspan="12" class="empty">Watch 종목 없음</td></tr>';
     return;
   }
-  // 점수 내림차순 정렬
-  items = [...items].sort((a,b) => b.score - a.score);
+  items = [...items]
+    .filter(w => ['S','A','B'].includes(w.grade))   // C등급 제외
+    .sort((a,b) => b.score - a.score);
 
   tbody.innerHTML = items.map(w => {
-    const ticker = w.market.replace('KRW-','');
+    const ticker   = (w.market || '').replace('KRW-','');
     const warnings = warningBadges(w);
     return `<tr>
       <td><b>${ticker}</b>${warnings}</td>
       <td>${gradeHtml(w.grade)}</td>
       <td>${scoreBarHtml(w.score)}</td>
-      <td>${priceCell(w.entry_price, w.current_price, w.price_change)}</td>
+      <td>${priceCell(w.reg_price, w.current_price, w.price_change)}</td>
       <td>${cycleBadge(w.d_short_cycle)}</td>
       <td>${cycleBadge(w.d_mid_cycle)}</td>
       <td>${cycleBadge(w.h4_cycle)}</td>
       <td>${cycleBadge(w.h1_cycle)}</td>
       <td>${gcBadge(w.h4_gc, w.h1_gc, w.daily_gc)}</td>
-      <td>${w.volume_ratio != null ? w.volume_ratio.toFixed(1)+'x' : '-'}</td>
+      <td>${w.vol_ratio != null ? w.vol_ratio.toFixed(1)+'x' : '-'}</td>
       <td>${w.bottom_days || 0}일</td>
       <td>
         <button class="btn btn-primary btn-sm" onclick="activateWatch('${w.market}')">진입</button>
-        <button class="btn btn-danger btn-sm" onclick="removeWatch('${w.market}')" style="margin-left:4px;">제거</button>
+        <button class="btn btn-danger btn-sm"  onclick="removeWatch('${w.market}')" style="margin-left:4px;">제거</button>
       </td>
     </tr>`;
   }).join('');
 }
 
-// ── Active 테이블 렌더 ────────────────────────────────
 function renderActive(items) {
   const tbody = document.getElementById('activeBody');
   if (!items || !items.length) {
@@ -405,18 +387,18 @@ function renderActive(items) {
     return;
   }
   tbody.innerHTML = items.map(a => {
-    const ticker = a.market.replace('KRW-','');
-    const pnl    = a.price_change || 0;
+    const ticker = (a.market || '').replace('KRW-','');
+    const pnl    = a.pnl_pct || 0;
     const pClass = pnl > 0 ? 'price-up' : (pnl < 0 ? 'price-down' : 'price-flat');
     return `<tr>
       <td><b>${ticker}</b></td>
       <td>${gradeHtml(a.grade)}</td>
-      <td>${priceCell(a.entry_price, a.current_price, a.price_change)}</td>
+      <td>${priceCell(a.entry_price, a.current_price, a.pnl_pct)}</td>
       <td class="${pClass}">${fmtPct(pnl)}</td>
       <td class="price-up">${fmtPrice(a.tp_price)}</td>
       <td class="price-down">${fmtPrice(a.sl_price)}</td>
       <td>${cycleBadge(a.d_short_cycle)}</td>
-      <td>${a.entered_at || '-'}</td>
+      <td>${(a.entry_at || '-').slice(5,16)}</td>
       <td>
         <button class="btn btn-danger btn-sm" onclick="closeActive('${a.market}')">청산</button>
       </td>
@@ -424,30 +406,28 @@ function renderActive(items) {
   }).join('');
 }
 
-// ── History 테이블 렌더 ───────────────────────────────
 function renderHistory(items) {
   const tbody = document.getElementById('historyBody');
   if (!items || !items.length) {
     tbody.innerHTML = '<tr><td colspan="7" class="empty">거래 내역 없음</td></tr>';
     return;
   }
-  const sorted = [...items].sort((a,b) => (b.closed_at||'').localeCompare(a.closed_at||''));
-  tbody.innerHTML = sorted.slice(0, 50).map(h => {
-    const pnl    = h.pnl || 0;
+  const sorted = [...items].sort((a,b) => (b.close_at||'').localeCompare(a.close_at||''));
+  tbody.innerHTML = sorted.slice(0,50).map(h => {
+    const pnl    = h.pnl_pct || 0;
     const pClass = pnl > 0 ? 'price-up' : (pnl < 0 ? 'price-down' : 'price-flat');
     return `<tr>
-      <td><b>${h.market.replace('KRW-','')}</b></td>
-      <td>${gradeHtml(h.grade)}</td>
+      <td><b>${(h.market||'').replace('KRW-','')}</b></td>
+      <td>${gradeHtml(h.grade || '-')}</td>
       <td>${fmtPrice(h.entry_price)}</td>
-      <td>${fmtPrice(h.exit_price)}</td>
+      <td>${fmtPrice(h.close_price)}</td>
       <td class="${pClass}">${fmtPct(pnl)}</td>
-      <td>${h.reason || '-'}</td>
-      <td>${h.closed_at || '-'}</td>
+      <td>${h.close_reason || '-'}</td>
+      <td>${(h.close_at || '-').slice(5,16)}</td>
     </tr>`;
   }).join('');
 }
 
-// ── 이벤트 렌더 ───────────────────────────────────────
 function renderEvents(events) {
   const el = document.getElementById('eventList');
   document.getElementById('eventCount').textContent = events.length;
@@ -456,136 +436,121 @@ function renderEvents(events) {
     return;
   }
   el.innerHTML = [...events].reverse().slice(0,50).map(e => {
-    const cls = 'event-' + (e.type || 'DEFAULT');
+    const typeMap = {
+      '📋':'WATCH_ADD','🗑️':'WATCH_REMOVE',
+      '✅':'ACTIVE_ENTER','🟢':'ACTIVE_CLOSE','🔴':'ACTIVE_CLOSE',
+      '🔥':'DEEP_SCAN'
+    };
+    const cls = 'event-' + (typeMap[e.emoji] || 'DEFAULT');
     return `<div class="event-item ${cls}">
-      <div class="event-time">${e.time || ''} · ${e.type || ''}</div>
-      <div>${e.message || ''}</div>
+      <div class="event-time">${e.time || ''}</div>
+      <div>${e.emoji || ''} ${e.msg || ''}</div>
     </div>`;
   }).join('');
 }
 
-// ── 상태 업데이트 ─────────────────────────────────────
 function updateState(data) {
   const s = data.state || {};
 
   // BTC
-  const btcKrw = s.btc_price || 0;
+  const btcKrw = s.btc_price  || 0;
   const usdRate = s.usdt_rate || 1450;
   const btcUsd  = btcKrw / usdRate;
   document.getElementById('btcPrice').textContent =
     btcKrw.toLocaleString('ko-KR') + '원 ($' + Math.round(btcUsd).toLocaleString() + ')';
 
-  const dSig = s.btc_daily_signal  || 'UNKNOWN';
-  const wSig = s.btc_weekly_signal || 'UNKNOWN';
-  const dEl  = document.getElementById('btcDailySignal');
-  const wEl  = document.getElementById('btcWeeklySignal');
-  dEl.textContent = 'Daily ' + dSig;
-  dEl.className   = 'btc-signal ' + dSig;
-  wEl.textContent = 'Weekly ' + wSig;
-  wEl.className   = 'btc-signal ' + wSig;
+  const dSig = s.btc_daily_above  === true  ? 'ABOVE'
+             : s.btc_daily_above  === false ? 'BELOW' : 'UNKNOWN';
+  const wSig = s.btc_weekly_above === true  ? 'ABOVE'
+             : s.btc_weekly_above === false ? 'BELOW' : 'UNKNOWN';
+
+  const dEl = document.getElementById('btcDailySignal');
+  const wEl = document.getElementById('btcWeeklySignal');
+  dEl.textContent = 'Daily '  + dSig; dEl.className = 'btc-signal ' + dSig;
+  wEl.textContent = 'Weekly ' + wSig; wEl.className = 'btc-signal ' + wSig;
 
   const dMa = s.btc_daily_ma20  || 0;
   const wMa = s.btc_weekly_ma20 || 0;
   document.getElementById('btcMa').textContent =
-    '일MA20: ' + dMa.toLocaleString('ko-KR') + ' / 주MA20: ' + wMa.toLocaleString('ko-KR');
+    '일MA20: ' + dMa.toLocaleString('ko-KR') +
+    ' / 주MA20: ' + wMa.toLocaleString('ko-KR');
 
   // 상태바
   const running = s.running || s.watch_rescanning || s.price_checking;
-  document.getElementById('scanDot').className = 'status-dot' + (running ? ' active' : '');
+  document.getElementById('scanDot').className    = 'status-dot' + (running ? ' active' : '');
   document.getElementById('scanStatus').textContent = running ? '스캔 중...' : '대기 중';
-  document.getElementById('nextScan').textContent = (s.next_scan || '-').slice(11,16);
-  document.getElementById('totalSymbols').textContent = s.total_symbols || 0;
-  document.getElementById('usdtRate').textContent = (s.usdt_rate || 0).toLocaleString();
+  document.getElementById('nextScan').textContent   = (s.next_scan || '-').slice(11,16);
+  document.getElementById('totalSymbols').textContent = s.scan_count || 0;
+  document.getElementById('usdtRate').textContent   = (s.usdt_rate || 0).toLocaleString();
 
   // 통계
   const watch   = data.watch   || [];
   const active  = data.active  || [];
   const history = data.history || [];
-  document.getElementById('watchCount').textContent  = watch.length;
+  document.getElementById('watchCount').textContent  = watch.filter(w => ['S','A','B'].includes(w.grade)).length;
   document.getElementById('activeCount').textContent = active.length;
-  const pnl = s.total_pnl || 0;
+  const pnl   = s.total_pnl || 0;
   const pnlEl = document.getElementById('totalPnl');
   pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%';
   pnlEl.style.color = pnl > 0 ? '#3fb950' : (pnl < 0 ? '#f85149' : '#c9d1d9');
 
-  // 테이블
   renderWatch(watch);
   renderActive(active);
   renderHistory(history);
 }
 
-// ── API 호출 ──────────────────────────────────────────
 async function fetchState() {
   try {
     const r = await fetch('/api/state');
     if (!r.ok) throw new Error('status ' + r.status);
-    const data = await r.json();
-    updateState(data);
-  } catch(e) {
-    console.error('fetchState:', e);
-  }
+    updateState(await r.json());
+  } catch(e) { console.error('fetchState:', e); }
 }
 
 async function fetchEvents() {
   try {
     const r = await fetch('/api/events');
     if (!r.ok) return;
-    const data = await r.json();
-    renderEvents(data.events || []);
+    renderEvents((await r.json()).events || []);
   } catch(e) { console.error('fetchEvents:', e); }
 }
 
 async function triggerScan() {
-  try {
-    await fetch('/api/scan', { method: 'POST' });
-    setTimeout(fetchState, 2000);
-  } catch(e) { console.error(e); }
+  await fetch('/api/scan', { method:'POST' });
+  setTimeout(fetchState, 2000);
 }
 
 async function resetWatch() {
   if (!confirm('Watch 목록을 초기화할까요?')) return;
-  try {
-    await fetch('/api/watch/reset', { method: 'POST' });
-    fetchState();
-  } catch(e) { console.error(e); }
+  await fetch('/api/watch/reset', { method:'POST' });
+  fetchState();
 }
 
 async function removeWatch(market) {
-  try {
-    await fetch('/api/watch/remove', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ market })
-    });
-    fetchState();
-  } catch(e) { console.error(e); }
+  await fetch('/api/watch/remove', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ market })
+  });
+  fetchState();
 }
 
 async function activateWatch(market) {
-  try {
-    await fetch('/api/watch/activate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ market })
-    });
-    fetchState();
-    switchTab('active');
-  } catch(e) { console.error(e); }
+  await fetch('/api/watch/activate', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ market })
+  });
+  fetchState(); switchTab('active');
 }
 
 async function closeActive(market) {
   if (!confirm(market + ' 청산할까요?')) return;
-  try {
-    await fetch('/api/active/close', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ market })
-    });
-    fetchState();
-  } catch(e) { console.error(e); }
+  await fetch('/api/active/close', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ market })
+  });
+  fetchState();
 }
 
-// ── 초기화 및 폴링 ────────────────────────────────────
 fetchState();
 fetchEvents();
 setInterval(fetchState,  30000);
@@ -595,7 +560,7 @@ setInterval(fetchEvents, 15000);
 </html>
 """
 
-# ── Flask 라우트 ──────────────────────────────────────
+# ── Flask 라우트 ──────────────────────────────────────────────
 @app.route('/')
 def index():
     return render_template_string(TEMPLATE, version=DASHBOARD_VERSION)
@@ -644,19 +609,21 @@ def api_watch_add():
     market = data.get('market', '').upper()
     if not market.startswith('KRW-'):
         market = 'KRW-' + market
-    return jsonify(sc.add_watch(market))
+    return jsonify(sc.manual_add_watch(market))
 
 @app.route('/api/watch/remove', methods=['POST'])
 def api_watch_remove():
     data   = request.get_json() or {}
     market = data.get('market', '')
-    return jsonify(sc.remove_watch(market))
+    ticker = market.replace('KRW-', '')
+    return jsonify(sc.manual_remove_watch(ticker))
 
 @app.route('/api/watch/activate', methods=['POST'])
 def api_watch_activate():
     data   = request.get_json() or {}
     market = data.get('market', '')
-    return jsonify(sc.activate_watch(market))
+    ticker = market.replace('KRW-', '')
+    return jsonify(sc.manual_activate_watch(ticker))
 
 @app.route('/api/watch/reset', methods=['POST'])
 def api_watch_reset():
@@ -666,42 +633,39 @@ def api_watch_reset():
 def api_active_close():
     data   = request.get_json() or {}
     market = data.get('market', '')
-    return jsonify(sc.close_active(market, reason='manual'))
+    ticker = market.replace('KRW-', '')
+    return jsonify(sc.manual_close_active(ticker, reason='수동종료'))
 
 @app.route('/api/config')
 def api_config():
     return jsonify({
         'scan_interval_min':   sc.SCAN_INTERVAL_MIN,
-        'rescan_interval_min': sc.RESCAN_INTERVAL_MIN,
-        'price_check_sec':     sc.PRICE_CHECK_SEC,
-        'tp_pct':              sc.TP_PCT,
-        'sl_pct':              sc.SL_PCT,
+        'rescan_interval_min': sc.WATCH_RESCAN_INTERVAL_MIN,
+        'price_check_min':     sc.PRICE_CHECK_INTERVAL_MIN,
+        'tp_pct':              sc.TRADE_TP_PCT,
+        'sl_pct':              sc.TRADE_SL_PCT,
         'watch_expire_days':   sc.WATCH_EXPIRE_DAYS,
         'allowed_grades':      ['S', 'A', 'B'],
-        'cycle_block':         ['PEAK', 'FALLING'],
     })
 
-# ── 앱 시작 ───────────────────────────────────────────
+# ── 앱 시작 ───────────────────────────────────────────────────
 def start_background_threads():
-    threads = [
+    for fn in [
         sc.scanner_loop,
         sc.watch_rescan_loop,
         sc.price_check_loop,
         sc.active_monitor_loop,
         sc.deep_scan_loop,
         sc.daily_summary_loop,
-    ]
-    for fn in threads:
-        t = threading.Thread(target=fn, daemon=True)
-        t.start()
+    ]:
+        threading.Thread(target=fn, daemon=True).start()
 
 if __name__ == '__main__':
     print(f'✅ Dashboard {DASHBOARD_VERSION} + Scanner {sc.VERSION} 시작')
     print(f'   MTF Setup: {sc.MTF_VERSION}')
     print(f'   사이클 감지: BOTTOM🟢 / RISING🔵 / PEAK🔴 / FALLING⚫')
-    print(f'   PEAK/FALLING → Watch 자동 차단 ❌')
-    print(f'   Watch 허용 등급: S / A / B (score≥55 + aligned≥2)')
-    print(f'   타이밍경고: 4h K≥70 ⚠️ | 과매수경고: 1h K≥80 🔴')
+    print(f'   모바일 레이아웃 수정 ✅')
+    print(f'   C등급 Watch 제외 ✅')
     print(f'🚀 http://0.0.0.0:{sc.PORT}')
     start_background_threads()
     app.run(host='0.0.0.0', port=sc.PORT, debug=False)
