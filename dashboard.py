@@ -1,11 +1,10 @@
 """
-dashboard.py v3.1.3
+dashboard.py v3.1.4
 변경사항:
-- v3.1.1: 모바일 레이아웃, C등급 제외, API 함수명 수정
-- v3.1.2: BTC 사이클 헤더 고정 표시
-           진입신호등 (🟢GOOD / 🟡CAUTION / 🔴BLOCK) 추가
-           BLOCK 시 Watch 테이블 상단 경고 배너 표시
-- v3.1.3: Watch 등록시각 컬럼 추가 (added_at 기반, KST MM-DD HH:MM)
+- v3.1.3: Watch 등록시각 컬럼 추가
+- v3.1.4: 🔥RS 배지 표시 (deep_rs_grade)
+           경과일 / 만료까지 D-N 표시
+           active_price_loop 백그라운드 스레드 추가
 """
 
 import threading
@@ -13,7 +12,7 @@ import traceback
 from flask import Flask, jsonify, request, render_template_string
 import scanner as sc
 
-DASHBOARD_VERSION = 'v3.1.3'
+DASHBOARD_VERSION = 'v3.1.4'
 app = Flask(__name__)
 
 TEMPLATE = """
@@ -27,7 +26,6 @@ TEMPLATE = """
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #0d1117; color: #c9d1d9; font-family: 'Segoe UI', sans-serif; font-size: 13px; }
 
-  /* ── 헤더 ── */
   .header {
     background: #161b22; border-bottom: 1px solid #30363d;
     padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
@@ -43,21 +41,14 @@ TEMPLATE = """
   .btc-signal.BELOW   { background: #4d1c1c; color: #f85149; }
   .btc-signal.UNKNOWN { background: #21262d; color: #8b949e; }
 
-  .btc-cycles {
-    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
-    margin-left: auto;
-  }
+  .btc-cycles { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-left: auto; }
   .btc-cycle-label { font-size: 11px; color: #8b949e; margin-right: 2px; }
 
-  .entry-signal {
-    padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: bold;
-    white-space: nowrap;
-  }
+  .entry-signal { padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: bold; white-space: nowrap; }
   .entry-signal.GOOD    { background: #1a4731; color: #3fb950; }
   .entry-signal.CAUTION { background: #3d2e0a; color: #d29922; }
   .entry-signal.BLOCK   { background: #4d1c1c; color: #f85149; animation: pulse 1s infinite; }
 
-  /* ── 상태바 ── */
   .status-bar {
     background: #161b22; border-bottom: 1px solid #30363d;
     padding: 6px 16px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
@@ -67,15 +58,12 @@ TEMPLATE = """
   .status-dot.active { background: #3fb950; animation: pulse 1.5s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
-  /* ── BLOCK 경고 배너 ── */
   .block-banner {
-    display: none;
-    background: #4d1c1c; border: 1px solid #f85149;
+    display: none; background: #4d1c1c; border: 1px solid #f85149;
     padding: 8px 16px; font-size: 13px; color: #f85149;
     text-align: center; font-weight: bold;
   }
 
-  /* ── 레이아웃 ── */
   .main { display: grid; grid-template-columns: 1fr 300px; gap: 0; height: calc(100vh - 110px); }
   .left-panel  { overflow-y: auto; padding: 12px; min-width: 0; }
   .right-panel { border-left: 1px solid #30363d; overflow-y: auto; padding: 12px; background: #0d1117; }
@@ -122,8 +110,19 @@ TEMPLATE = """
   .price-down { color: #f85149; }
   .price-flat { color: #8b949e; }
 
-  /* 등록시각 셀 */
-  .reg-at { font-size: 11px; color: #8b949e; white-space: nowrap; }
+  /* 등록시각 + 경과/만료 */
+  .reg-at-cell { display: flex; flex-direction: column; gap: 2px; }
+  .reg-at-time { font-size: 11px; color: #8b949e; }
+  .reg-at-elapsed { font-size: 10px; color: #58a6ff; }
+  .reg-at-expire  { font-size: 10px; }
+  .expire-ok   { color: #3fb950; }
+  .expire-warn { color: #d29922; }
+  .expire-soon { color: #f85149; }
+
+  /* DEEP RS 배지 */
+  .badge-rs-S { background: #4d3219; color: #f0883e; }
+  .badge-rs-A { background: #1a4731; color: #3fb950; }
+  .badge-rs-B { background: #1c2d4a; color: #58a6ff; }
 
   .cycle-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; }
   .cycle-BOTTOM  { background: #1a4731; color: #3fb950; }
@@ -160,18 +159,15 @@ TEMPLATE = """
 </head>
 <body>
 
-<!-- ── 헤더 (sticky) ── -->
 <div class="header">
   <h1>📊 Upbit StochRSI Scanner</h1>
   <span class="version-badge">{{ version }}</span>
-
   <div class="btc-info">
     <span class="btc-price" id="btcPrice">로딩중...</span>
     <span id="btcDailySignal"  class="btc-signal UNKNOWN">Daily -</span>
     <span id="btcWeeklySignal" class="btc-signal UNKNOWN">Weekly -</span>
     <span id="btcMa" style="font-size:11px;color:#8b949e;"></span>
   </div>
-
   <div class="btc-cycles">
     <span class="btc-cycle-label">BTC</span>
     <span id="btcDShort" class="cycle-badge cycle-RISING">일단기 -</span>
@@ -182,12 +178,10 @@ TEMPLATE = """
   </div>
 </div>
 
-<!-- ── BLOCK 경고 배너 ── -->
 <div class="block-banner" id="blockBanner">
   🚫 BTC 단기+중기 PEAK/FALLING — 신규 진입 자제 (auto_entry 차단 중)
 </div>
 
-<!-- ── 상태바 ── -->
 <div class="status-bar">
   <div class="status-item">
     <div class="status-dot" id="scanDot"></div>
@@ -202,7 +196,6 @@ TEMPLATE = """
   </div>
 </div>
 
-<!-- ── 메인 ── -->
 <div class="main">
   <div class="left-panel">
     <div class="stat-cards">
@@ -226,7 +219,6 @@ TEMPLATE = """
       <button class="tab-btn"        onclick="switchTab('history')" id="tabHistory">📜 History</button>
     </div>
 
-    <!-- Watch -->
     <div id="watchPanel">
       <div class="table-wrap">
         <table>
@@ -250,7 +242,6 @@ TEMPLATE = """
       </div>
     </div>
 
-    <!-- Active -->
     <div id="activePanel" style="display:none;">
       <div class="table-wrap">
         <table>
@@ -263,7 +254,6 @@ TEMPLATE = """
       </div>
     </div>
 
-    <!-- History -->
     <div id="historyPanel" style="display:none;">
       <div class="table-wrap">
         <table>
@@ -277,7 +267,6 @@ TEMPLATE = """
     </div>
   </div>
 
-  <!-- 이벤트 -->
   <div class="right-panel">
     <div class="panel-title">
       📡 실시간 이벤트
@@ -300,12 +289,6 @@ function switchTab(tab) {
 }
 
 // ── 포맷 유틸 ─────────────────────────────────────────────────────
-function fmtRegAt(iso) {
-  if (!iso) return '-';
-  // "2026-05-27T11:51:00" → "05-27 11:51"
-  return iso.slice(5, 16).replace('T', ' ');
-}
-
 function fmtPrice(p) {
   if (!p && p!==0) return '-';
   if (p>=1000000) return (p/1000000).toFixed(2)+'M';
@@ -338,6 +321,43 @@ function priceCell(entry, current, pct) {
     <span class="price-change ${cls}">${arrow} ${fmtPct(p)}</span>
   </div>`;
 }
+
+// ── v3.1.4: 등록시각 + 경과일 + 만료일 ──────────────────────────
+function fmtRegAtCell(addedAt, expireAt) {
+  if (!addedAt) return '<span class="reg-at-time">-</span>';
+
+  const timeStr = addedAt.slice(5,16).replace('T',' ');
+
+  // 경과일 계산
+  const now     = new Date();
+  const added   = new Date(addedAt);
+  const elapsedMs   = now - added;
+  const elapsedHrs  = Math.floor(elapsedMs / 3600000);
+  const elapsedDays = Math.floor(elapsedMs / 86400000);
+  let elapsedStr = '';
+  if (elapsedDays >= 1)      elapsedStr = `+${elapsedDays}일`;
+  else if (elapsedHrs >= 1)  elapsedStr = `+${elapsedHrs}시간`;
+  else                       elapsedStr = '+방금';
+
+  // 만료까지 남은 일수
+  let expireHtml = '';
+  if (expireAt) {
+    const exp      = new Date(expireAt);
+    const remainMs = exp - now;
+    const remainD  = Math.ceil(remainMs / 86400000);
+    let expCls = 'expire-ok';
+    if (remainD <= 1)      expCls = 'expire-soon';
+    else if (remainD <= 2) expCls = 'expire-warn';
+    expireHtml = `<span class="reg-at-expire ${expCls}">D-${remainD}</span>`;
+  }
+
+  return `<div class="reg-at-cell">
+    <span class="reg-at-time">${timeStr}</span>
+    <span class="reg-at-elapsed">${elapsedStr}</span>
+    ${expireHtml}
+  </div>`;
+}
+
 function cycleBadge(cycle) {
   const label={BOTTOM:'🟢바닥',RISING:'🔵상승',PEAK:'🔴고점',FALLING:'⚫하락'};
   const c=cycle||'RISING';
@@ -350,6 +370,13 @@ function gcBadge(h4gc,h1gc,dailyGc) {
   if(h1gc)    b+=`<span class="badge badge-gc">1hGC</span>`;
   return b||'-';
 }
+
+// ── v3.1.4: DEEP RS 배지 ─────────────────────────────────────────
+function deepRsBadge(grade) {
+  if (!grade || grade === '-') return '';
+  return `<span class="badge badge-rs-${grade}">🔥RS-${grade}</span>`;
+}
+
 function warningBadges(item) {
   let b='';
   if(item.timing_warning)     b+=`<span class="badge badge-warning">⚠️4h</span>`;
@@ -357,7 +384,6 @@ function warningBadges(item) {
   return b;
 }
 
-// ── BTC 사이클 업데이트 ──────────────────────────────────────────
 function updateBtcCycles(s) {
   const cycleLabel = {BOTTOM:'🟢바닥',RISING:'🔵상승',PEAK:'🔴고점',FALLING:'⚫하락'};
   const cycles = {
@@ -373,7 +399,6 @@ function updateBtcCycles(s) {
     el.className = `cycle-badge cycle-${cycle}`;
     el.textContent = labels[id]+' '+(cycleLabel[cycle]||cycle);
   });
-
   const sig = s.btc_entry_signal || 'CAUTION';
   const sigEl = document.getElementById('entrySignal');
   const sigMap = {
@@ -384,7 +409,6 @@ function updateBtcCycles(s) {
   const sm = sigMap[sig] || sigMap.CAUTION;
   sigEl.className   = `entry-signal ${sm.cls}`;
   sigEl.textContent = sm.text;
-
   const banner = document.getElementById('blockBanner');
   if (banner) banner.style.display = sig==='BLOCK' ? 'block' : 'none';
 }
@@ -400,11 +424,11 @@ function renderWatch(items) {
   tbody.innerHTML=items.map(w=>{
     const ticker=(w.market||'').replace('KRW-','');
     return `<tr>
-      <td><b>${ticker}</b>${warningBadges(w)}</td>
+      <td><b>${ticker}</b>${warningBadges(w)}${deepRsBadge(w.deep_rs_grade)}</td>
       <td>${gradeHtml(w.grade)}</td>
       <td>${scoreBarHtml(w.score)}</td>
       <td>${priceCell(w.reg_price,w.current_price,w.price_change)}</td>
-      <td><span class="reg-at">${fmtRegAt(w.added_at)}</span></td>
+      <td>${fmtRegAtCell(w.added_at, w.expire_at)}</td>
       <td>${cycleBadge(w.d_short_cycle)}</td>
       <td>${cycleBadge(w.d_mid_cycle)}</td>
       <td>${cycleBadge(w.h4_cycle)}</td>
@@ -420,7 +444,6 @@ function renderWatch(items) {
   }).join('');
 }
 
-// ── Active 렌더링 ────────────────────────────────────────────────
 function renderActive(items) {
   const tbody=document.getElementById('activeBody');
   if (!items||!items.length) {
@@ -432,20 +455,19 @@ function renderActive(items) {
     const pnl=a.pnl_pct||0;
     const pc=pnl>0?'price-up':pnl<0?'price-down':'price-flat';
     return `<tr>
-      <td><b>${ticker}</b></td>
+      <td><b>${ticker}</b>${deepRsBadge(a.deep_rs_grade)}</td>
       <td>${gradeHtml(a.grade)}</td>
       <td>${priceCell(a.entry_price,a.current_price,a.pnl_pct)}</td>
       <td class="${pc}">${fmtPct(pnl)}</td>
       <td class="price-up">${fmtPrice(a.tp_price)}</td>
       <td class="price-down">${fmtPrice(a.sl_price)}</td>
       <td>${cycleBadge(a.d_short_cycle)}</td>
-      <td>${fmtRegAt(a.entry_at)}</td>
+      <td>${(a.entry_at||'-').slice(5,16).replace('T',' ')}</td>
       <td><button class="btn btn-danger btn-sm" onclick="closeActive('${a.market}')">청산</button></td>
     </tr>`;
   }).join('');
 }
 
-// ── History 렌더링 ───────────────────────────────────────────────
 function renderHistory(items) {
   const tbody=document.getElementById('historyBody');
   if (!items||!items.length) {
@@ -463,12 +485,11 @@ function renderHistory(items) {
       <td>${fmtPrice(h.close_price)}</td>
       <td class="${pc}">${fmtPct(pnl)}</td>
       <td>${h.close_reason||'-'}</td>
-      <td>${fmtRegAt(h.close_at)}</td>
+      <td>${(h.close_at||'-').slice(5,16).replace('T',' ')}</td>
     </tr>`;
   }).join('');
 }
 
-// ── 이벤트 렌더링 ────────────────────────────────────────────────
 function renderEvents(events) {
   const el=document.getElementById('eventList');
   document.getElementById('eventCount').textContent=events.length;
@@ -483,10 +504,8 @@ function renderEvents(events) {
   }).join('');
 }
 
-// ── 상태 업데이트 ────────────────────────────────────────────────
 function updateState(data) {
   const s=data.state||{};
-
   const btcKrw=s.btc_price||0;
   const usdRate=s.usdt_rate||1450;
   document.getElementById('btcPrice').textContent=
@@ -496,8 +515,8 @@ function updateState(data) {
   const wSig=s.btc_weekly_above===true?'ABOVE':s.btc_weekly_above===false?'BELOW':'UNKNOWN';
   const dEl=document.getElementById('btcDailySignal');
   const wEl=document.getElementById('btcWeeklySignal');
-  dEl.textContent='Daily '+dSig;   dEl.className='btc-signal '+dSig;
-  wEl.textContent='Weekly '+wSig;  wEl.className='btc-signal '+wSig;
+  dEl.textContent='Daily '+dSig; dEl.className='btc-signal '+dSig;
+  wEl.textContent='Weekly '+wSig; wEl.className='btc-signal '+wSig;
 
   const dMa=s.btc_daily_ma20||0, wMa=s.btc_weekly_ma20||0;
   document.getElementById('btcMa').textContent=
@@ -525,7 +544,6 @@ function updateState(data) {
   renderHistory(history);
 }
 
-// ── API 호출 ─────────────────────────────────────────────────────
 async function fetchState() {
   try {
     const r=await fetch('/api/state');
@@ -572,7 +590,6 @@ setInterval(fetchEvents, 15000);
 </html>
 """
 
-# ── Flask 라우트 ──────────────────────────────────────────────────
 @app.route('/')
 def index():
     return render_template_string(TEMPLATE, version=DASHBOARD_VERSION)
@@ -647,17 +664,24 @@ def api_config():
 
 def start_background_threads():
     for fn in [
-        sc.scanner_loop, sc.watch_rescan_loop, sc.price_check_loop,
-        sc.active_monitor_loop, sc.deep_scan_loop, sc.daily_summary_loop,
+        sc.scanner_loop,
+        sc.watch_rescan_loop,
+        sc.price_check_loop,
+        sc.active_monitor_loop,
+        sc.active_price_loop,      # v3.1.4: 30초 가격 루프 추가
+        sc.deep_scan_loop,
+        sc.daily_summary_loop,
     ]:
         threading.Thread(target=fn, daemon=True).start()
 
 if __name__ == '__main__':
     print(f'✅ Dashboard {DASHBOARD_VERSION} + Scanner {sc.VERSION} 시작')
     print(f'   MTF: {sc.MTF_VERSION}')
-    print(f'   BTC 사이클 헤더 고정 표시 ✅')
+    print(f'   BTC 사이클 헤더 고정 ✅')
     print(f'   진입신호: 🟢GOOD / 🟡CAUTION / 🔴BLOCK ✅')
-    print(f'   Watch 등록시각 컬럼 추가 (added_at) ✅')
+    print(f'   Watch 등록시각 + 경과일 + D-N 만료 표시 ✅')
+    print(f'   🔥RS 배지 (DEEP 상대강도) ✅')
+    print(f'   Active 30초 가격 업데이트 루프 ✅')
     print(f'🚀 http://0.0.0.0:{sc.PORT}')
     start_background_threads()
     app.run(host='0.0.0.0', port=sc.PORT, debug=False)
