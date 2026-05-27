@@ -1,10 +1,8 @@
 """
-scanner.py v3.0.6
+scanner.py v3.0.7
 변경사항:
-- v3.0.5: BTC StochRSI 사이클, 진입신호 (GOOD/CAUTION/BLOCK)
-- v3.0.6: Active 30초 가격 업데이트 루프 분리
-           DEEP 이력 기반 RS 보너스 점수 반영
-           Watch 등록 시 deep_rs_grade 필드 저장
+- v3.0.6: Active 30초 루프, DEEP RS 보너스
+- v3.0.7: DEEP 스캔 다중 시간대 RS (1h/4h/24h) 적용
 """
 
 import os
@@ -21,7 +19,7 @@ import requests
 import mtf_setup as _mtf
 from mtf_setup import VERSION as MTF_VERSION
 
-VERSION = 'v3.0.6'
+VERSION = 'v3.0.7'
 PORT    = int(os.environ.get('PORT', '8080'))
 KST     = timezone(timedelta(hours=9))
 
@@ -170,7 +168,7 @@ def _is_expired(item: dict) -> bool:
         return False
 
 
-def _calc_btc_entry_signal(d_short: str, d_mid: str, h4: str, h1: str) -> str:
+def _calc_btc_entry_signal(d_short, d_mid, h4, h1) -> str:
     bad = ('PEAK', 'FALLING')
     if d_short in bad and d_mid in bad:
         return 'BLOCK'
@@ -183,9 +181,7 @@ def _calc_btc_entry_signal(d_short: str, d_mid: str, h4: str, h1: str) -> str:
     return 'CAUTION'
 
 
-# ── v3.0.6: DEEP 이력에서 RS 등급 조회 ───────────────────────────
 def _get_deep_rs_grade(ticker: str) -> str:
-    """deep_list.json 에서 해당 ticker의 RS 등급 반환"""
     try:
         deep_list = load_deep_list()
         for item in deep_list:
@@ -275,8 +271,9 @@ def get_btc_info() -> dict:
     ma20_info = _mtf.btc_ma20_signal(closes_daily, closes_weekly)
     price     = ma20_info.get('price')
 
-    pct_4h = round((closes_h4[-1]-closes_h4[-2])/closes_h4[-2]*100,2) if len(closes_h4)>=2 else None
-    pct_1h = round((closes_h1[-1]-closes_h1[-2])/closes_h1[-2]*100,2) if len(closes_h1)>=2 else None
+    pct_4h  = round((closes_h4[-1]-closes_h4[-2])/closes_h4[-2]*100,2) if len(closes_h4)>=2 else None
+    pct_1h  = round((closes_h1[-1]-closes_h1[-2])/closes_h1[-2]*100,2) if len(closes_h1)>=2 else None
+    pct_24h = round((closes_daily[-1]-closes_daily[-2])/closes_daily[-2]*100,2) if len(closes_daily)>=2 else None
 
     btc_mtf = _mtf.analyze_mtf({
         'daily': closes_daily,
@@ -306,6 +303,7 @@ def get_btc_info() -> dict:
         'weekly_pct':       ma20_info.get('weekly_pct'),
         'pct_1h':           pct_1h,
         'pct_4h':           pct_4h,
+        'pct_24h':          pct_24h,   # v3.0.7 추가
         'd_short_cycle':    d_short_cycle,
         'd_mid_cycle':      d_mid_cycle,
         'h4_cycle':         h4_cycle,
@@ -366,9 +364,16 @@ def _fmt_close_msg(item: dict, reason: str, pnl_pct: float) -> str:
 def _fmt_deep_msg(items: list, btc_pct: str) -> str:
     lines = [f'🔥 <b>DEEP 상대강도 감지</b> (BTC {btc_pct}%)\n']
     for it in items[:5]:
+        rs_detail = ''
+        if it.get('rs_1h') is not None:
+            rs_detail += f'1h:{it["rs_1h"]:+.1f}%'
+        if it.get('rs_4h') is not None:
+            rs_detail += f' 4h:{it["rs_4h"]:+.1f}%'
+        if it.get('rs_24h') is not None:
+            rs_detail += f' 24h:{it["rs_24h"]:+.1f}%'
         lines.append(
             f'  <b>{it["ticker"]}</b> [{it.get("deep_grade","-")}] '
-            f'RS: +{it.get("rs",0)}% | 변화: {it.get("coin_pct","?")}%'
+            f'RS종합: {it.get("rs",0):+.1f}% ({rs_detail})'
         )
     return '\n'.join(lines) + f'\n⏰ {_now_hm()}'
 
@@ -388,22 +393,19 @@ def analyze_ticker(market: str):
         mtf     = _mtf.analyze_mtf({'daily': daily, 'h4': h4, 'h1': h1})
         summary = mtf['summary']
 
-        # ── v3.0.6: DEEP RS 보너스 점수 반영 ─────────────────────
         ticker        = market.replace('KRW-', '')
         deep_rs_grade = _get_deep_rs_grade(ticker)
         base_score    = summary.get('score', 0)
 
-        deep_bonus = {'S': 15, 'A': 10, 'B': 5}
-        bonus      = deep_bonus.get(deep_rs_grade, 0)
+        deep_bonus  = {'S': 15, 'A': 10, 'B': 5}
+        bonus       = deep_bonus.get(deep_rs_grade, 0)
         final_score = min(base_score + bonus, 100)
 
-        # 점수 변동 시 등급 재계산
         grade = summary.get('grade', '-')
         if bonus > 0 and not summary.get('any_buy_no'):
             if final_score >= 80:   grade = 'S'
             elif final_score >= 65: grade = 'A'
             elif final_score >= 45: grade = 'B'
-        # ─────────────────────────────────────────────────────────
 
         vol_ratio   = get_volume_ratio(market)
         bottom_days = _count_bottom_days(get_candles(market,'days',count=30), 'long')
@@ -491,7 +493,7 @@ def _make_watch_item(res: dict) -> dict:
         'd_mid_cycle':   res.get('d_mid_cycle',   'RISING'),
         'h4_cycle':      res.get('h4_cycle',       'RISING'),
         'h1_cycle':      res.get('h1_cycle',       'RISING'),
-        'deep_rs_grade': res.get('deep_rs_grade', '-'),  # v3.0.6
+        'deep_rs_grade': res.get('deep_rs_grade', '-'),
         'added_at':      now,
         'expire_at':     expire_at,
         'score_history': [res.get('score', 0)],
@@ -533,7 +535,7 @@ def _make_active_item(watch_item: dict, price: float, trade_type: str = 'auto') 
         'd_mid_cycle':   watch_item.get('d_mid_cycle',   'RISING'),
         'h4_cycle':      watch_item.get('h4_cycle',       'RISING'),
         'h1_cycle':      watch_item.get('h1_cycle',       'RISING'),
-        'deep_rs_grade': watch_item.get('deep_rs_grade', '-'),  # v3.0.6
+        'deep_rs_grade': watch_item.get('deep_rs_grade', '-'),
     }
 
 
@@ -561,40 +563,84 @@ def close_active_item(item: dict, reason: str, close_price: float) -> dict:
     return closed
 
 
+# ══════════════════════════════════════════════════════════════════
+# v3.0.7: DEEP 스캔 - 다중 시간대 RS
+# ══════════════════════════════════════════════════════════════════
 def run_deep_scan(btc_info: dict):
     with _state_lock:
         _scanner_state['deep_scanning'] = True
     add_event('🔥', 'DEEP 스캔 시작')
     try:
         tickers = get_krw_tickers()
-        btc_pct = min(btc_info.get('pct_1h') or 0, btc_info.get('pct_4h') or 0)
+
+        # BTC 각 시간대 변화율
+        btc_pct_1h  = btc_info.get('pct_1h')  or 0
+        btc_pct_4h  = btc_info.get('pct_4h')  or 0
+        btc_pct_24h = btc_info.get('pct_24h') or 0
+
         results = []
 
         def _check(market):
-            time.sleep(REQUEST_DELAY)
-            coin_pct = get_price_change_pct(market, 'minutes/60', 1)
-            if coin_pct is None:
-                return None
-            rs_info = _mtf.calc_relative_strength(coin_pct, btc_pct)
-            if rs_info['grade'] == '-':
-                return None
-            daily = get_candles(market, 'days', count=30)
-            if daily:
-                r = _mtf.calc_stoch_rsi(daily, 'long')
-                if r.get('k') is not None and r['k'] >= 70:
+            try:
+                time.sleep(REQUEST_DELAY)
+
+                # 코인 각 시간대 변화율
+                coin_pct_1h = get_price_change_pct(market, 'minutes/60',  1)
+                if coin_pct_1h is None:
                     return None
-            time.sleep(REQUEST_DELAY)
-            return {
-                'ticker':     market.replace('KRW-',''),
-                'market':     market,
-                'coin_pct':   coin_pct,
-                'btc_pct':    btc_pct,
-                'rs':         rs_info['rs'],
-                'deep_grade': rs_info['grade'],
-                'signal':     rs_info['signal'],
-                'vol_ratio':  get_volume_ratio(market),
-                'scanned_at': _now_iso(),
-            }
+                time.sleep(REQUEST_DELAY)
+
+                coin_pct_4h  = get_price_change_pct(market, 'minutes/240', 1)
+                time.sleep(REQUEST_DELAY)
+
+                coin_pct_24h = get_price_change_pct(market, 'days', 1)
+
+                # 다중 시간대 RS 계산
+                rs_info = _mtf.calc_relative_strength(
+                    coin_pct_1h  = coin_pct_1h,
+                    btc_pct_1h   = btc_pct_1h,
+                    coin_pct_4h  = coin_pct_4h,
+                    btc_pct_4h   = btc_pct_4h,
+                    coin_pct_24h = coin_pct_24h,
+                    btc_pct_24h  = btc_pct_24h,
+                )
+
+                # C등급 이하 제외
+                if rs_info['grade'] in ('-', 'C'):
+                    return None
+
+                # 일봉 과매수 필터
+                time.sleep(REQUEST_DELAY)
+                daily = get_candles(market, 'days', count=30)
+                if daily:
+                    r = _mtf.calc_stoch_rsi(daily, 'long')
+                    if r.get('k') is not None and r['k'] >= 70:
+                        return None
+
+                time.sleep(REQUEST_DELAY)
+                vol_ratio = get_volume_ratio(market)
+
+                return {
+                    'ticker':      market.replace('KRW-',''),
+                    'market':      market,
+                    'coin_pct_1h': coin_pct_1h,
+                    'coin_pct_4h': coin_pct_4h,
+                    'coin_pct_24h':coin_pct_24h,
+                    'btc_pct_1h':  btc_pct_1h,
+                    'btc_pct_4h':  btc_pct_4h,
+                    'btc_pct_24h': btc_pct_24h,
+                    'rs':          rs_info['rs'],
+                    'rs_1h':       rs_info['rs_1h'],
+                    'rs_4h':       rs_info['rs_4h'],
+                    'rs_24h':      rs_info['rs_24h'],
+                    'deep_grade':  rs_info['grade'],
+                    'signal':      rs_info['signal'],
+                    'vol_ratio':   vol_ratio,
+                    'scanned_at':  _now_iso(),
+                }
+            except Exception as e:
+                log.warning(f'DEEP _check {market}: {e}')
+                return None
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
             for res in as_completed({ex.submit(_check, m): m for m in tickers}):
@@ -614,7 +660,7 @@ def run_deep_scan(btc_info: dict):
         add_event('🔥', f'DEEP 스캔 완료 {len(top)}개 감지')
         alert = [r for r in top if r['deep_grade'] in ('S','A')]
         if alert:
-            send_telegram(_fmt_deep_msg(alert, f'{btc_pct:+.1f}'))
+            send_telegram(_fmt_deep_msg(alert, f'{btc_pct_1h:+.1f}'))
 
     except Exception as e:
         log.error(f'DEEP 스캔 오류: {e}')
@@ -813,8 +859,7 @@ def _run_watch_rescan():
     active_tickers  = {a['ticker'] for a in actives}
     updated_watches = []
     new_actives     = []
-
-    btc_signal = _scanner_state.get('btc_entry_signal', 'CAUTION')
+    btc_signal      = _scanner_state.get('btc_entry_signal', 'CAUTION')
 
     try:
         for item in watches:
@@ -977,9 +1022,7 @@ def _run_price_check():
         _scanner_state['price_checking']   = False
 
 
-# ── v3.0.6: Active 30초 가격 업데이트 루프 ───────────────────────
 def active_price_loop():
-    """Active 현재가만 30초마다 빠르게 업데이트 (TP/SL 체크 제외)"""
     log.info('⚡ active_price_loop 시작 (30초 주기)')
     while True:
         try:
@@ -1081,7 +1124,6 @@ def get_scanner_state() -> dict:
 
 print(f'✅ Scanner {VERSION} 로드 완료')
 print(f'   MTF: {MTF_VERSION}')
-print(f'   BTC 사이클 + 진입신호 ✅')
-print(f'   DEEP RS 보너스 점수 반영 ✅')
-print(f'   Active 30초 가격 업데이트 루프 ✅')
+print(f'   DEEP RS: 1h(50%) + 4h(30%) + 24h(20%) 가중 평균 ✅')
+print(f'   Active 30초 가격 업데이트 ✅')
 print(f'   Watch 자동해제: 만료/하락{WATCH_DROP_PCT}%/상승+{WATCH_RISE_PCT}%/사이클악화 ✅')
