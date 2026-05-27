@@ -1,14 +1,14 @@
 """
-mtf_setup.py v3.0.3
+mtf_setup.py v3.0.4
 변경사항:
-- v3.0.1: 점수 기반 등급 일치, 주봉 MA20, BTC 일봉/주봉 MA20 동시 반환
-- v3.0.2: 사이클 감지 추가 (BOTTOM/RISING/PEAK/FALLING)
-- v3.0.3: DEEP 상대강도 보너스 점수 추가 (S:+15 / A:+10 / B:+5)
+- v3.0.3: DEEP 상대강도 보너스 점수 추가
+- v3.0.4: calc_relative_strength 다중 시간대 RS 가중 평균으로 개선
+           RS_1h(50%) + RS_4h(30%) + RS_24h(20%) 종합
 """
 
 import numpy as np
 
-VERSION = 'v3.0.3'
+VERSION = 'v3.0.4'
 
 PARAMS = {
     'short': {'rsi':  5, 'stoch':  5, 'k_smooth':  3, 'd_smooth':  3},
@@ -242,47 +242,40 @@ def _calc_score(d_long, d_mid, d_short, h4_short, h1_short,
                 deep_rs_grade: str = None) -> int:
     score = 0
 
-    # 일봉 장기 과매도 (30점 + 극단 보너스 10점)
     if d_long.get('zone') == 'oversold':
         k = d_long.get('k') or 50
         score += 30
         if k <= 10:
             score += 10
 
-    # 일봉 장기 골든크로스 (10점)
     if d_long.get('signal') == 'BUY_OK':
         score += 10
 
-    # 일봉 중기 과매도 (10점) + 골든크로스 (5점)
     if d_mid.get('zone') == 'oversold':
         score += 10
     if d_mid.get('signal') == 'BUY_OK':
         score += 5
 
-    # 일봉 단기 과매도 (5점) + 골든크로스 (5점)
     if d_short.get('zone') == 'oversold':
         score += 5
     if d_short.get('signal') == 'BUY_OK':
         score += 5
 
-    # 4h 골든크로스 (20점) / 과매도만 (8점)
     if h4_short.get('signal') == 'BUY_OK':
         score += 20
     elif h4_short.get('zone') == 'oversold':
         score += 8
 
-    # 1h 골든크로스 (15점) / 과매도만 (5점)
     if h1_short.get('signal') == 'BUY_OK':
         score += 15
     elif h1_short.get('zone') == 'oversold':
         score += 5
 
-    # ── v3.0.3: DEEP 상대강도 보너스 ─────────────────────────
+    # DEEP RS 보너스
     deep_bonus = {'S': 15, 'A': 10, 'B': 5}
     if deep_rs_grade in deep_bonus:
         score += deep_bonus[deep_rs_grade]
 
-    # 패널티
     if d_long.get('signal')   == 'BUY_NO':
         score = max(0, score - 40)
     if h4_short.get('signal') == 'BUY_NO':
@@ -290,7 +283,6 @@ def _calc_score(d_long, d_mid, d_short, h4_short, h1_short,
     if h1_short.get('signal') == 'BUY_NO':
         score = max(0, score - 10)
 
-    # 사이클 페널티
     d_short_cycle = d_short.get('cycle', 'RISING')
     d_mid_cycle   = d_mid.get('cycle',   'RISING')
 
@@ -338,29 +330,73 @@ def btc_ma20_signal(btc_daily_closes: list, btc_weekly_closes: list = None) -> d
     return result
 
 
-def calc_relative_strength(coin_pct: float, btc_pct: float) -> dict:
-    rs = round(coin_pct - btc_pct, 2)
+# ══════════════════════════════════════════════════════════════
+# v3.0.4: 다중 시간대 상대강도 분석
+# ══════════════════════════════════════════════════════════════
 
-    if rs >= 5.0:
+def calc_relative_strength(
+    coin_pct_1h:  float,
+    btc_pct_1h:   float,
+    coin_pct_4h:  float = None,
+    btc_pct_4h:   float = None,
+    coin_pct_24h: float = None,
+    btc_pct_24h:  float = None,
+) -> dict:
+    """
+    다중 시간대 RS 가중 평균
+    RS_1h(50%) + RS_4h(30%) + RS_24h(20%)
+    값이 없는 시간대는 제외하고 가중치 재분배
+    """
+    segments = []
+
+    # 1h (가중치 0.5)
+    rs_1h = round(coin_pct_1h - btc_pct_1h, 2)
+    segments.append({'rs': rs_1h, 'weight': 0.5, 'label': '1h'})
+
+    # 4h (가중치 0.3)
+    if coin_pct_4h is not None and btc_pct_4h is not None:
+        rs_4h = round(coin_pct_4h - btc_pct_4h, 2)
+        segments.append({'rs': rs_4h, 'weight': 0.3, 'label': '4h'})
+
+    # 24h (가중치 0.2)
+    if coin_pct_24h is not None and btc_pct_24h is not None:
+        rs_24h = round(coin_pct_24h - btc_pct_24h, 2)
+        segments.append({'rs': rs_24h, 'weight': 0.2, 'label': '24h'})
+
+    # 가중치 재정규화 (없는 시간대 제외)
+    total_weight = sum(s['weight'] for s in segments)
+    rs_weighted  = sum(s['rs'] * s['weight'] / total_weight for s in segments)
+    rs_weighted  = round(rs_weighted, 2)
+
+    # 등급 판정
+    if rs_weighted >= 5.0:
         grade  = 'S'
         signal = 'STRONG_BUY'
-    elif rs >= 3.0:
+    elif rs_weighted >= 3.0:
         grade  = 'A'
         signal = 'BUY'
-    elif rs >= 2.0:
+    elif rs_weighted >= 2.0:
         grade  = 'B'
         signal = 'WATCH'
-    elif rs >= 0:
+    elif rs_weighted >= 0:
         grade  = 'C'
         signal = 'NEUTRAL'
     else:
         grade  = '-'
         signal = 'WEAK'
 
-    return {'rs': rs, 'grade': grade, 'signal': signal}
+    return {
+        'rs':      rs_weighted,
+        'rs_1h':   rs_1h,
+        'rs_4h':   segments[1]['rs'] if len(segments) > 1 else None,
+        'rs_24h':  segments[2]['rs'] if len(segments) > 2 else None,
+        'grade':   grade,
+        'signal':  signal,
+    }
 
 
 if __name__ == '__main__' or True:
     print(f'mtf_setup.py {VERSION} 로드 완료 ✅')
     print(f'  사이클 감지: BOTTOM / RISING / PEAK / FALLING')
-    print(f'  DEEP RS 보너스: S+15 / A+10 / B+5')
+    print(f'  DEEP RS: 1h(50%) + 4h(30%) + 24h(20%) 가중 평균')
+    print(f'  RS 보너스: S+15 / A+10 / B+5')
