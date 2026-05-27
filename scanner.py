@@ -1,9 +1,10 @@
 """
-scanner.py v3.0.2
+scanner.py v3.0.3
 변경사항:
 - v3.0.1: USDT 환율, 주봉 MA20, 이벤트 로그, 스캔 상태 플래그 세분화, 중복 스캔 방지
 - v3.0.2: analyze_ticker() 반환값에 사이클 정보 추가
            (d_short_cycle, d_mid_cycle, h4_cycle, h1_cycle)
+- v3.0.3: C등급 Watch 등록 차단, C등급 auto_entry 차단
 """
 
 import os
@@ -17,10 +18,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import requests
 
-import mtf_setup as _mtf                  # ← 하나로 통합
+import mtf_setup as _mtf
 from mtf_setup import VERSION as MTF_VERSION
 
-VERSION = 'v3.0.2'
+VERSION = 'v3.0.3'
+PORT = int(os.environ.get('PORT', '8080'))
 
 # ── 로깅 ──────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -51,9 +53,9 @@ TRADE_TIMEOUT_H = int(os.environ.get('TRADE_TIMEOUT_H',  '48'))
 BTC_DROP_1H_PCT = float(os.environ.get('BTC_DROP_1H_PCT', '-1.0'))
 BTC_DROP_4H_PCT = float(os.environ.get('BTC_DROP_4H_PCT', '-2.0'))
 
-PORT = int(os.environ.get('PORT', '8080'))
-
 WATCH_EXPIRE_DAYS = {'S': 7, 'A': 7, 'B': 5, 'C': 3, 'X': 1, '-': 1}
+
+ALLOWED_GRADES = {'S', 'A', 'B'}  # ← C등급 제외
 
 # 스테이블 코인 제외
 STABLE_COINS = {
@@ -399,7 +401,6 @@ def analyze_ticker(market: str):
             'vol_ratio':   vol_ratio,
             'bottom_days': bottom_days,
 
-            # v3.0.2: 사이클 정보
             'd_short_cycle': mtf['daily']['short'].get('cycle', 'RISING'),
             'd_mid_cycle':   mtf['daily']['mid'].get('cycle',   'RISING'),
             'h4_cycle':      mtf['h4']['short'].get('cycle',    'RISING'),
@@ -459,7 +460,6 @@ def _make_watch_item(res: dict) -> dict:
         'vol_ratio':     res.get('vol_ratio', 1.0),
         'bottom_days':   res.get('bottom_days', 0),
 
-        # v3.0.2: 사이클 정보
         'd_short_cycle': res.get('d_short_cycle', 'RISING'),
         'd_mid_cycle':   res.get('d_mid_cycle',   'RISING'),
         'h4_cycle':      res.get('h4_cycle',       'RISING'),
@@ -505,7 +505,6 @@ def _make_active_item(watch_item: dict, price: float, trade_type: str = 'auto') 
         'vol_ratio':     watch_item.get('vol_ratio', 1.0),
         'bottom_days':   watch_item.get('bottom_days', 0),
 
-        # v3.0.2: 사이클 정보
         'd_short_cycle': watch_item.get('d_short_cycle', 'RISING'),
         'd_mid_cycle':   watch_item.get('d_mid_cycle',   'RISING'),
         'h4_cycle':      watch_item.get('h4_cycle',       'RISING'),
@@ -752,9 +751,11 @@ def _run_full_scan():
             if not res:
                 return
             ticker = res['ticker']
+            # ── v3.0.3: S/A/B 등급만 Watch 등록 ──────────────
             if (
                 res.get('watch_eligible') and
                 not res.get('any_buy_no') and
+                res.get('grade') in ALLOWED_GRADES and
                 ticker not in watch_tickers and
                 ticker not in active_tickers
             ):
@@ -840,7 +841,11 @@ def _run_watch_rescan():
                 add_event('❌', f'{ticker} BUY_NO 감지 → Watch 제거')
                 continue
 
-            if res.get('auto_entry'):
+            # ── v3.0.3: S/A/B 등급만 auto_entry 허용 ─────────
+            if (
+                res.get('auto_entry') and
+                res.get('grade') in ALLOWED_GRADES
+            ):
                 price = get_current_price(market)
                 if price:
                     updated_item = {**item, **{
@@ -1067,3 +1072,4 @@ def get_scanner_state() -> dict:
 
 print(f'✅ Scanner v{VERSION} 로드 완료')
 print(f'   MTF: {MTF_VERSION}')
+print(f'   허용 등급: {sorted(ALLOWED_GRADES)} (C등급 차단 ✅)')
