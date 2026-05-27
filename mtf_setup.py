@@ -9,6 +9,7 @@ mtf_setup.py v3.0.5
 import numpy as np
 
 MTF_VERSION = 'v3.0.5'
+VERSION = MTF_VERSION
 
 OVERSOLD  = 20.0
 OVERBOUGHT = 80.0
