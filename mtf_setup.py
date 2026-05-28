@@ -457,4 +457,61 @@ def detect_divergence(closes, term='short', lookback=60):
             k_low1, k_low2         = float(round(k_vals[ki1], 2)), float(round(k_vals[ki2], 2))
             price_low1, price_low2 = float(round(prices[pi1], 4)), float(round(prices[pi2], 4))
             k_diff                 = k_vals[ki2] - k_vals[ki1]
-            div_strength
+            div_strength           = 'STRONG' if k_diff >= 8 and k_vals[ki2] <= 25 else 'NORMAL'
+
+    # 일반 약세 다이버전스
+    if len(price_highs) >= 2 and len(k_highs) >= 2:
+        pi1, pi2 = price_highs[-2], price_highs[-1]
+        ki1, ki2 = k_highs[-2],     k_highs[-1]
+        if prices[pi2] > prices[pi1] and k_vals[ki2] < k_vals[ki1] and k_vals[ki2] >= 65:
+            bear_div = True
+            if div_strength == 'NONE':
+                k_diff       = k_vals[ki1] - k_vals[ki2]
+                div_strength = 'STRONG' if k_diff >= 8 and k_vals[ki2] >= 75 else 'NORMAL'
+
+    # 히든 강세 다이버전스
+    if len(price_lows) >= 2 and len(k_lows) >= 2 and not bull_div:
+        pi1, pi2 = price_lows[-2],  price_lows[-1]
+        ki1, ki2 = k_lows[-2],      k_lows[-1]
+        if prices[pi2] > prices[pi1] and k_vals[ki2] < k_vals[ki1] and k_vals[ki2] <= 50:
+            hidden_bull = True
+            if div_strength == 'NONE':
+                div_strength = 'NORMAL'
+
+    # 히든 약세 다이버전스
+    if len(price_highs) >= 2 and len(k_highs) >= 2 and not bear_div:
+        pi1, pi2 = price_highs[-2], price_highs[-1]
+        ki1, ki2 = k_highs[-2],     k_highs[-1]
+        if prices[pi2] < prices[pi1] and k_vals[ki2] > k_vals[ki1] and k_vals[ki2] >= 50:
+            hidden_bear = True
+            if div_strength == 'NONE':
+                div_strength = 'NORMAL'
+
+    if bull_div:        div_type = 'BULL'
+    elif bear_div:      div_type = 'BEAR'
+    elif hidden_bull:   div_type = 'HIDDEN_BULL'
+    elif hidden_bear:   div_type = 'HIDDEN_BEAR'
+    else:               div_type = 'NONE'
+
+    result.update({
+        'div_type':     str(div_type),
+        'bull_div':     bool(bull_div),
+        'bear_div':     bool(bear_div),
+        'hidden_bull':  bool(hidden_bull),
+        'hidden_bear':  bool(hidden_bear),
+        'div_strength': str(div_strength),
+        'k_low1':      k_low1,
+        'k_low2':      k_low2,
+        'price_low1': price_low1,
+        'price_low2': price_low2,
+    })
+    return result
+
+
+if __name__ == '__main__' or True:
+    print(f'mtf_setup.py {VERSION} 로드 완료 ✅')
+    print(f'  사이클 감지: BOTTOM / RISING / PEAK / FALLING')
+    print(f'  DEEP RS 보너스: S+15 / A+10 / B+5')
+    print(f'  DEEP RS: 1h(50%) + 4h(30%) + 24h(20%) 가중 평균')
+    print(f'  다이버전스: BULL / BEAR / HIDDEN_BULL / HIDDEN_BEAR ✅')
+    print(f'  analyze_mtf 반환구조: daily/h4/h1 × short/mid/long ✅')
