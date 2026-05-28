@@ -1,11 +1,9 @@
 """
-dashboard.py v3.1.6
+dashboard.py v3.2.0
 Changes:
-- v3.1.4: 🔥RS 배지, 경과일/D-N, active_price_loop
-- v3.1.5: BTC 5분봉/15분봉 사이클 배지, ⚡ GOOD+ 신호, /api/btc 엔드포인트
 - v3.1.6: 다이버전스 배지 추가 (🔼BULL DIV / 🔽BEAR DIV / ↗HID BULL)
-           divBadge() JS 함수 추가
-           Watch/Active 테이블 종목명 셀에 divBadge 삽입
+- v3.2.0: 🌟 트레일링 스탑 활성화 UI 추가 (🚀추적중 배지)
+          🌟 종목명 배지 겹침 현상 해결 (ticker-cell flex-wrap 적용)
 """
 
 import threading
@@ -13,7 +11,7 @@ import traceback
 from flask import Flask, jsonify, request, render_template_string
 import scanner as sc
 
-DASHBOARD_VERSION = 'v3.1.6'
+DASHBOARD_VERSION = 'v3.2.0'
 app = Flask(__name__)
 
 TEMPLATE = """
@@ -95,9 +93,12 @@ TEMPLATE = """
 
   .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th { background: #161b22; color: #8b949e; padding: 6px 8px; text-align: left; white-space: nowrap; position: sticky; top: 0; border-bottom: 1px solid #30363d; }
+  th { background: #161b22; color: #8b949e; padding: 6px 8px; text-align: left; white-space: nowrap; position: sticky; top: 0; border-bottom: 1px solid #30363d; z-index: 10; }
   td { padding: 6px 8px; border-bottom: 1px solid #21262d; white-space: nowrap; vertical-align: middle; }
   tr:hover td { background: #161b22; }
+
+  /* UI 겹침 방지: flex-wrap 도입 */
+  .ticker-cell { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 
   .grade-S { color: #f0883e; font-weight: bold; }
   .grade-A { color: #3fb950; font-weight: bold; }
@@ -137,17 +138,20 @@ TEMPLATE = """
 
   .badge-gc-active { background: #39d353; color: #0d1117; font-weight: bold; }
 
-  .badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; margin-left: 3px; }
+  .badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; margin-left: 3px; white-space: nowrap; }
   .badge-warning { background: #3d2e0a; color: #d29922; }
   .badge-danger  { background: #4d1c1c; color: #f85149; }
   .badge-gc      { background: #1c2d4a; color: #79c0ff; }
 
-  /* v3.1.6: 다이버전스 배지 스타일 */
+  /* 다이버전스 배지 스타일 */
   .badge-bull-strong { background: #0d3d1a; color: #39d353; border: 1px solid #39d353; }
   .badge-bull        { background: #1a4731; color: #3fb950; }
   .badge-bear-strong { background: #4d1c1c; color: #f85149; border: 1px solid #f85149; }
   .badge-bear        { background: #3d1c1c; color: #f85149; }
   .badge-hid-bull    { background: #1c2d4a; color: #79c0ff; }
+
+  /* 🌟 트레일링 스탑 배지 스타일 */
+  .badge-trailing    { background: #1f6feb; color: #fff; border: 1px solid #388bfd; animation: pulse 1.5s infinite; }
 
   .event-item { padding: 6px 8px; border-bottom: 1px solid #21262d; font-size: 11px; }
   .event-time { color: #8b949e; font-size: 10px; }
@@ -266,7 +270,7 @@ TEMPLATE = """
         <table>
           <thead><tr>
             <th>종목</th><th>등급</th><th>진입가/현재가</th><th>수익률</th>
-            <th>TP</th><th>SL</th><th>단기사이클</th><th>진입시각</th><th>관리</th>
+            <th>TP</th><th>가변 SL</th><th>단기사이클</th><th>진입시각</th><th>관리</th>
           </tr></thead>
           <tbody id="activeBody"><tr><td colspan="9" class="empty">Active 종목 없음</td></tr></tbody>
         </table>
@@ -389,7 +393,7 @@ function warningBadges(item) {
   return b;
 }
 
-// ── v3.1.6: 다이버전스 배지 ─────────────────────────────────────
+// ── 배지 렌더링 함수들 ─────────────────────────────────────
 function divBadge(item) {
   if(!item) return '';
   if(item.bull_div && item.div_strength==='STRONG')
@@ -405,7 +409,14 @@ function divBadge(item) {
   return '';
 }
 
-// ── BTC 사이클 업데이트 (v3.1.5: 15m/5m 포함) ───────────────────
+function trailingBadge(item) {
+  if(item && item.trailing_activated) {
+    return `<span class="badge badge-trailing">🚀추적중</span>`;
+  }
+  return '';
+}
+
+// ── BTC 사이클 업데이트 ───────────────────
 function updateBtcCycles(s) {
   const cycleLabel={BOTTOM:'🟢바닥',RISING:'🔵상승',PEAK:'🔴고점',FALLING:'⚫하락'};
 
@@ -458,7 +469,7 @@ function updateBtcCycles(s) {
   document.getElementById('goodplusBanner').style.display = sig==='GOOD+'  ? 'block' : 'none';
 }
 
-// ── Watch 렌더링 (v3.1.6: divBadge 추가) ────────────────────────
+// ── Watch 렌더링 ────────────────────────
 function renderWatch(items) {
   const tbody=document.getElementById('watchBody');
   if(!items||!items.length){
@@ -469,7 +480,7 @@ function renderWatch(items) {
   tbody.innerHTML=items.map(w=>{
     const ticker=(w.market||'').replace('KRW-','');
     return `<tr>
-      <td><b>${ticker}</b>${warningBadges(w)}${deepRsBadge(w.deep_rs_grade)}${divBadge(w)}</td>
+      <td><div class="ticker-cell"><b>${ticker}</b>${warningBadges(w)}${deepRsBadge(w.deep_rs_grade)}${divBadge(w)}</div></td>
       <td>${gradeHtml(w.grade)}</td>
       <td>${scoreBarHtml(w.score)}</td>
       <td>${priceCell(w.reg_price,w.current_price,w.price_change)}</td>
@@ -489,7 +500,7 @@ function renderWatch(items) {
   }).join('');
 }
 
-// ── Active 렌더링 (v3.1.6: divBadge 추가) ───────────────────────
+// ── Active 렌더링 ───────────────────────
 function renderActive(items) {
   const tbody=document.getElementById('activeBody');
   if(!items||!items.length){
@@ -501,7 +512,7 @@ function renderActive(items) {
     const pnl=a.pnl_pct||0;
     const pc=pnl>0?'price-up':pnl<0?'price-down':'price-flat';
     return `<tr>
-      <td><b>${ticker}</b>${deepRsBadge(a.deep_rs_grade)}${divBadge(a)}</td>
+      <td><div class="ticker-cell"><b>${ticker}</b>${deepRsBadge(a.deep_rs_grade)}${divBadge(a)}${trailingBadge(a)}</div></td>
       <td>${gradeHtml(a.grade)}</td>
       <td>${priceCell(a.entry_price,a.current_price,a.pnl_pct)}</td>
       <td class="${pc}">${fmtPct(pnl)}</td>
@@ -593,7 +604,7 @@ function updateState(data) {
   renderHistory(history);
 }
 
-// ── BTC 전용 경량 갱신 (10초) ─────────────────────────────────────
+// ── API 호출 함수들 ─────────────────────────────────────
 async function fetchBtc() {
   try {
     const r=await fetch('/api/btc');
@@ -766,8 +777,8 @@ def start_background_threads():
         sc.watch_rescan_loop,
         sc.price_check_loop,
         sc.active_monitor_loop,
-        sc.active_price_loop,    # v3.1.4
-        sc.btc_fast_loop,        # v3.1.5
+        sc.active_price_loop,
+        sc.btc_fast_loop,
         sc.deep_scan_loop,
         sc.daily_summary_loop,
     ]:
@@ -785,7 +796,7 @@ if __name__ == '__main__':
     print(f'   fetchState/fetchBtc 10초 갱신 ✅')
     print(f'   Watch 등록시각 + 경과일 + D-N 만료 표시 ✅')
     print(f'   🔥RS 배지 (DEEP 상대강도) ✅')
-    print(f'   Active 30초 가격 업데이트 루프 ✅')
+    print(f'   Active 30초 가격 업데이트 및 🌟트레일링 UI ✅')
     print(f'   🔼🔽 다이버전스 배지 (BULL★/BULL/BEAR★/BEAR/HID BULL) ✅')
     start_background_threads()
     app.run(host='0.0.0.0', port=sc.PORT, debug=False)
