@@ -1418,7 +1418,6 @@ print(f'   다이버전스 탐지: BULL / BEAR / HIDDEN_BULL ✅')
 print(f'   하락다이버전스 + PEAK → Watch 자동 해제 ✅')
 print(f'   BTC 전용 빠른 루프: 5분봉/15분봉 10초 갱신 ✅')
 print(f'   ⚡ GOOD+ 신호: 1h바닥 + 15m GC + 5m GC ✅')
-                _scanner_state['btc_rebound_detected'] = True
 print(f'   🔄 BTC 반등 감지: FALLING→BOTTOM + DEEP RS 자동 Watch 등록 ✅')
 print(f'   DEEP RS: 1h(50%) + 4h(30%) + 24h(20%) 가중 평균 ✅')
 print(f'   Active 30초 가격 및 트레일링 스탑 업데이트 ✅')
