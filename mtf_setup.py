@@ -1,10 +1,11 @@
 """
-mtf_setup.py v3.0.5
+mtf_setup.py v3.0.5 (Fixed for JSON Serialization)
 변경사항:
 - v3.0.3: DEEP 상대강도 보너스 추가
 - v3.0.4: calc_relative_strength 가중 멀티타임프레임 평균
 - v3.0.5: detect_divergence() 추가
-           analyze_mtf() 반환 구조 scanner.py 호환으로 수정
+          analyze_mtf() 반환 구조 scanner.py 호환으로 수정
+- JSON 직렬화 오류 방지를 위해 Numpy 타입을 Python 기본 타입으로 캐스팅 추가 완료
 """
 
 import numpy as np
@@ -124,14 +125,15 @@ def calc_stoch_rsi(closes, term='short'):
     signal   = _get_signal(zone_str, cross_up, cross_down)
     cycle    = _detect_cycle(valid_k)
 
+    # 파이썬 기본 Primitive 타입 캐스팅으로 직렬화 보장
     return {
-        'k':          round(k, 2),
-        'd':          round(d, 2),
-        'cross_up':   cross_up,
-        'cross_down': cross_down,
-        'zone':       zone_str,
-        'signal':     signal,
-        'cycle':      cycle,
+        'k':          float(round(k, 2)),
+        'd':          float(round(d, 2)),
+        'cross_up':   bool(cross_up),
+        'cross_down': bool(cross_down),
+        'zone':       str(zone_str),
+        'signal':     str(signal),
+        'cycle':      str(cycle),
     }
 
 
@@ -208,18 +210,18 @@ def _summarize(results):
     )
 
     return {
-        'score':          score,
-        'grade':          grade,
-        'd_short_cycle':  d_short_cycle,
-        'd_mid_cycle':    d_mid_cycle,
-        'h4_cycle':       h4_cycle,
-        'h1_cycle':       h1_cycle,
-        'h4_gc':          h4_gc,
-        'h1_gc':          h1_gc,
-        'daily_gc':       daily_gc,
-        'any_buy_no':     any_buy_no,
-        'watch_eligible': watch_eligible,
-        'auto_entry':     auto_entry,
+        'score':          int(score),
+        'grade':          str(grade),
+        'd_short_cycle':  str(d_short_cycle),
+        'd_mid_cycle':    str(d_mid_cycle),
+        'h4_cycle':       str(h4_cycle),
+        'h1_cycle':       str(h1_cycle),
+        'h4_gc':          bool(h4_gc),
+        'h1_gc':          bool(h1_gc),
+        'daily_gc':       bool(daily_gc),
+        'any_buy_no':     bool(any_buy_no),
+        'watch_eligible': bool(watch_eligible),
+        'auto_entry':     bool(auto_entry),
     }
 
 
@@ -284,7 +286,7 @@ def _calc_score(d_long, d_mid, d_short, h4_short, h1_short,
     if d_mid_cycle in bad:
         score = max(0, score - 10)
 
-    return min(100, max(0, score))
+    return int(min(100, max(0, score)))
 
 
 def _calc_grade(score, deep_rs_grade=None):
@@ -325,13 +327,13 @@ def btc_ma20_signal(daily_closes, weekly_closes=None):
         weekly_pct   = round((price - weekly_ma20) / weekly_ma20 * 100, 2)
 
     return {
-        'price':        price,
-        'daily_above':  daily_above,
-        'weekly_above': weekly_above,
-        'daily_ma20':   round(daily_ma20),
-        'weekly_ma20':  round(weekly_ma20),
-        'daily_pct':    daily_pct,
-        'weekly_pct':   weekly_pct,
+        'price':        float(price) if price is not None else None,
+        'daily_above':  bool(daily_above) if daily_above is not None else None,
+        'weekly_above': bool(weekly_above) if weekly_above is not None else None,
+        'daily_ma20':   int(round(daily_ma20)),
+        'weekly_ma20':  int(round(weekly_ma20)),
+        'daily_pct':    float(daily_pct) if daily_pct is not None else None,
+        'weekly_pct':   float(weekly_pct) if weekly_pct is not None else None,
     }
 
 
@@ -375,12 +377,12 @@ def calc_relative_strength(
     else:                grade, signal = '-', 'WEAK'
 
     return {
-        'rs':     round(rs_value, 4),
-        'grade':  grade,
-        'signal': signal,
-        'rs_1h':  rs_components.get('1h'),
-        'rs_4h':  rs_components.get('4h'),
-        'rs_24h': rs_components.get('24h'),
+        'rs':     float(round(rs_value, 4)),
+        'grade':  str(grade),
+        'signal': str(signal),
+        'rs_1h':  float(rs_components['1h']) if rs_components.get('1h') is not None else None,
+        'rs_4h':  float(rs_components['4h']) if rs_components.get('4h') is not None else None,
+        'rs_24h': float(rs_components['24h']) if rs_components.get('24h') is not None else None,
     }
 
 
@@ -411,7 +413,7 @@ def detect_divergence(closes, term='short', lookback=60):
         'hidden_bull': False,
         'hidden_bear': False,
         'div_strength': 'NONE',
-        'k_low1':     None, 'k_low2':     None,
+        'k_low1':      None, 'k_low2':      None,
         'price_low1': None, 'price_low2': None,
     }
 
@@ -452,64 +454,7 @@ def detect_divergence(closes, term='short', lookback=60):
         ki1, ki2 = k_lows[-2],      k_lows[-1]
         if prices[pi2] < prices[pi1] and k_vals[ki2] > k_vals[ki1] and k_vals[ki2] <= 35:
             bull_div               = True
-            k_low1, k_low2         = round(k_vals[ki1], 2), round(k_vals[ki2], 2)
-            price_low1, price_low2 = round(prices[pi1], 4), round(prices[pi2], 4)
+            k_low1, k_low2         = float(round(k_vals[ki1], 2)), float(round(k_vals[ki2], 2))
+            price_low1, price_low2 = float(round(prices[pi1], 4)), float(round(prices[pi2], 4))
             k_diff                 = k_vals[ki2] - k_vals[ki1]
-            div_strength           = 'STRONG' if k_diff >= 8 and k_vals[ki2] <= 25 else 'NORMAL'
-
-    # 일반 약세 다이버전스
-    if len(price_highs) >= 2 and len(k_highs) >= 2:
-        pi1, pi2 = price_highs[-2], price_highs[-1]
-        ki1, ki2 = k_highs[-2],     k_highs[-1]
-        if prices[pi2] > prices[pi1] and k_vals[ki2] < k_vals[ki1] and k_vals[ki2] >= 65:
-            bear_div = True
-            if div_strength == 'NONE':
-                k_diff       = k_vals[ki1] - k_vals[ki2]
-                div_strength = 'STRONG' if k_diff >= 8 and k_vals[ki2] >= 75 else 'NORMAL'
-
-    # 히든 강세 다이버전스
-    if len(price_lows) >= 2 and len(k_lows) >= 2 and not bull_div:
-        pi1, pi2 = price_lows[-2],  price_lows[-1]
-        ki1, ki2 = k_lows[-2],      k_lows[-1]
-        if prices[pi2] > prices[pi1] and k_vals[ki2] < k_vals[ki1] and k_vals[ki2] <= 50:
-            hidden_bull = True
-            if div_strength == 'NONE':
-                div_strength = 'NORMAL'
-
-    # 히든 약세 다이버전스
-    if len(price_highs) >= 2 and len(k_highs) >= 2 and not bear_div:
-        pi1, pi2 = price_highs[-2], price_highs[-1]
-        ki1, ki2 = k_highs[-2],     k_highs[-1]
-        if prices[pi2] < prices[pi1] and k_vals[ki2] > k_vals[ki1] and k_vals[ki2] >= 50:
-            hidden_bear = True
-            if div_strength == 'NONE':
-                div_strength = 'NORMAL'
-
-    if bull_div:        div_type = 'BULL'
-    elif bear_div:      div_type = 'BEAR'
-    elif hidden_bull:   div_type = 'HIDDEN_BULL'
-    elif hidden_bear:   div_type = 'HIDDEN_BEAR'
-    else:               div_type = 'NONE'
-
-    result.update({
-        'div_type':    div_type,
-        'bull_div':    bull_div,
-        'bear_div':    bear_div,
-        'hidden_bull': hidden_bull,
-        'hidden_bear': hidden_bear,
-        'div_strength': div_strength,
-        'k_low1':     k_low1,
-        'k_low2':     k_low2,
-        'price_low1': price_low1,
-        'price_low2': price_low2,
-    })
-    return result
-
-
-if __name__ == '__main__' or True:
-    print(f'mtf_setup.py {VERSION} 로드 완료 ✅')
-    print(f'  사이클 감지: BOTTOM / RISING / PEAK / FALLING')
-    print(f'  DEEP RS 보너스: S+15 / A+10 / B+5')
-    print(f'  DEEP RS: 1h(50%) + 4h(30%) + 24h(20%) 가중 평균')
-    print(f'  다이버전스: BULL / BEAR / HIDDEN_BULL / HIDDEN_BEAR ✅')
-    print(f'  analyze_mtf 반환구조: daily/h4/h1 × short/mid/long ✅')
+            div_strength
