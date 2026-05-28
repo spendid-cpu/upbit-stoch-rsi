@@ -1,10 +1,12 @@
 """
-scanner.py v3.2.0 (Advanced Risk Management Version)
+scanner.py v3.2.0 (Advanced Risk Management & Stable Version)
 변경사항:
 - v3.1.0: 다이버전스 탐지 추가
 - v3.2.0: 🌟 트레일링 스탑 고도화 (+2% 수익 도달 시 활성화, 고점 대비 1% 하락 시 청산)
            🌟 ATR(Average True Range) 기반 코인별 가변 손절매(SL) 로직 주입
            🌟 문법 오류(SyntaxError) 및 JSON 직렬화 안정성 완벽 검증
+           🌟 누락되었던 send_telegram, get_price_change_pct 함수 복구 완료
+           🌟 레일웨이 환경변수(TELEGRAM_BOT_TOKEN) 매칭 완료
 """
 
 import os
@@ -40,6 +42,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# 🌟 레일웨이 설정에 맞춰 TELEGRAM_BOT_TOKEN 으로 수정 완료
 TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 
@@ -345,6 +348,28 @@ def get_btc_info() -> dict:
         'entry_signal':     entry_signal,
     }
 
+# 🌟 누락되었던 핵심 함수 2개 추가 완료!
+def get_price_change_pct(market: str, unit: str, periods: int = 1):
+    candles = get_candles(market, unit, count=periods+1)
+    if len(candles) < 2:
+        return None
+    old = candles[-(periods+1)]
+    new = candles[-1]
+    return round((new-old)/old*100, 2) if old != 0 else None
+
+
+def send_telegram(msg: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage',
+            json={'chat_id': TELEGRAM_CHAT_ID, 'text': msg, 'parse_mode': 'HTML'},
+            timeout=10
+        )
+    except Exception as e:
+        log.warning(f'텔레그램 전송 실패: {e}')
+
 
 def _fmt_watch_msg(item: dict) -> str:
     deep_tag = f' 🔥RS-{item["deep_rs_grade"]}' if item.get('deep_rs_grade') not in (None,'-') else ''
@@ -577,7 +602,7 @@ def analyze_ticker(market: str):
             'div_h4':             div_info['div_h4'],
             'div_h1':             div_info['div_h1'],
             'div_bonus':          div_bonus,
-            'atr_h1':             atr_h1,  # 🌟 ATR 반환 필드 주입
+            'atr_h1':             atr_h1,
             'analyzed_at':        _now_iso(),
         }
     except Exception as e:
@@ -638,7 +663,7 @@ def _make_watch_item(res: dict, reg_from: str = 'scan') -> dict:
         'div_daily':     res.get('div_daily',   'NONE'),
         'div_h4':        res.get('div_h4',      'NONE'),
         'div_h1':        res.get('div_h1',      'NONE'),
-        'atr_h1':        res.get('atr_h1', 0.0),  # 🌟 Watch 저장 단계 추가
+        'atr_h1':        res.get('atr_h1', 0.0),
         'added_at':      now,
         'expire_at':     expire_at,
         'score_history': [res.get('score', 0)],
@@ -651,13 +676,12 @@ def _make_active_item(watch_item: dict, price: float, trade_type: str = 'auto') 
     now    = _now_iso()
     tp     = round(price * (1 + TRADE_TP_PCT / 100), 2)
     
-    # 🌟 고도화: 고정 3% 대신 ATR 기반의 동적 가변 손절가(SL) 산출 (최대 손실폭 5% 하드필터 적용 보호)
     atr = watch_item.get('atr_h1', 0.0)
     if atr > 0:
         sl_buffer = atr * ATR_MULTIPLIER
         sl = round(max(price - sl_buffer, price * 0.95), 2)
     else:
-        sl = round(price * 0.97, 2)  # 예외 예방 백업용 고정 3%
+        sl = round(price * 0.97, 2)
         
     expire = (_now() + timedelta(hours=TRADE_TIMEOUT_H)).strftime('%Y-%m-%dT%H:%M:%S')
     return {
@@ -667,15 +691,15 @@ def _make_active_item(watch_item: dict, price: float, trade_type: str = 'auto') 
         'score':         watch_item.get('score', 0),
         'entry_price':   price,
         'tp_price':      tp,
-        'sl_price':      sl,  # 🌟 동적 ATR 손절값 탑재
+        'sl_price':      sl,
         'trade_type':    trade_type,
         'entry_at':      now,
         'expire_at':     expire,
         'current_price': price,
         'pnl_pct':       0.0,
-        'max_price':     price,  # 🌟 최고점 트래킹용 기본값 세팅
+        'max_price':     price,
         'min_price':     price,
-        'trailing_activated': False,  # 🌟 트레일링 스탑 활성화 플래그 기본값
+        'trailing_activated': False,
         'daily_long_k':  watch_item.get('daily_long_k'),
         'daily_short_k': watch_item.get('daily_short_k'),
         'h4_short_k':    watch_item.get('h4_short_k'),
@@ -886,9 +910,9 @@ def run_deep_scan(btc_info: dict):
                 coin_pct_24h = get_price_change_pct(market, 'days', 1)
 
                 rs_info = _mtf.calc_relative_strength(
-                    coin_pct_1h=coin_pct_1h, btc_pct_1h=btc_info.get('pct_1h',0),
-                    coin_pct_4h=coin_pct_4h, btc_pct_4h=btc_info.get('pct_4h',0),
-                    coin_pct_24h=coin_pct_24h, btc_pct_24h=btc_info.get('pct_24h',0),
+                    coin_pct_1h=coin_pct_1h, btc_pct_1h=btc_pct_1h,
+                    coin_pct_4h=coin_pct_4h, btc_pct_4h=btc_pct_4h,
+                    coin_pct_24h=coin_pct_24h, btc_pct_24h=btc_pct_24h,
                 )
                 if rs_info['grade'] in ('-', 'C'):
                     return None
@@ -1092,8 +1116,10 @@ def _run_full_scan():
             ):
                 item     = _make_watch_item(res, reg_from='scan')
                 new_watches.append(item)
-                log.info(f'  📋 Watch: {ticker} [{res["grade"]}] {res["score"]}점')
-                add_event('📋', f'{ticker} Watch 등록 [{res["grade"]}]')
+                deep_tag = f' 🔥RS-{res["deep_rs_grade"]}' if res.get('deep_rs_grade','-') != '-' else ''
+                div_tag  = f' 🔼BULL' if res.get('bull_div') else (f' ↗HID' if res.get('hidden_bull') else '')
+                log.info(f'  📋 Watch: {ticker} [{res["grade"]}] {res["score"]}점{deep_tag}{div_tag}')
+                add_event('📋', f'{ticker} Watch 등록 [{res["grade"]}] {res["score"]}점{deep_tag}{div_tag}')
                 send_telegram(_fmt_watch_msg(item))
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
@@ -1190,20 +1216,68 @@ def _run_watch_rescan():
                 btc_signal not in ('BLOCK',)
             ):
                 if price:
-                    item.update({'grade': res['grade'], 'score': res['score'], 'h4_short_k': res.get('h4_short_k'), 'h4_short_d': res.get('h4_short_d'), 'h4_gc': res.get('h4_gc', False), 'h1_short_k': res.get('h1_short_k'), 'h1_short_d': res.get('h1_short_d'), 'h1_gc': res.get('h1_gc', False), 'daily_short_k': res.get('daily_short_k'), 'daily_long_k': res.get('daily_long_k'), 'd_short_cycle': res.get('d_short_cycle'), 'd_mid_cycle': res.get('d_mid_cycle'), 'h4_cycle': res.get('h4_cycle'), 'h1_cycle': res.get('h1_cycle'), 'deep_rs_grade': res.get('deep_rs_grade'), 'bull_div': res.get('bull_div'), 'bear_div': res.get('bear_div'), 'hidden_bull': res.get('hidden_bull'), 'div_type': res.get('div_type'), 'div_strength': res.get('div_strength')})
-                    active = _make_active_item(item, price, 'auto')
+                    updated_item = {**item, **{
+                        'grade':         res['grade'],
+                        'score':         res['score'],
+                        'h4_short_k':    res.get('h4_short_k'),
+                        'h4_short_d':    res.get('h4_short_d'),
+                        'h4_gc':         res.get('h4_gc', False),
+                        'h1_short_k':    res.get('h1_short_k'),
+                        'h1_short_d':    res.get('h1_short_d'),
+                        'h1_gc':         res.get('h1_gc', False),
+                        'daily_short_k': res.get('daily_short_k'),
+                        'daily_long_k':  res.get('daily_long_k'),
+                        'd_short_cycle': res.get('d_short_cycle', 'RISING'),
+                        'd_mid_cycle':   res.get('d_mid_cycle',   'RISING'),
+                        'h4_cycle':      res.get('h4_cycle',       'RISING'),
+                        'h1_cycle':      res.get('h1_cycle',       'RISING'),
+                        'deep_rs_grade': res.get('deep_rs_grade', '-'),
+                        'bull_div':      res.get('bull_div',    False),
+                        'bear_div':      res.get('bear_div',    False),
+                        'hidden_bull':   res.get('hidden_bull', False),
+                        'div_type':      res.get('div_type',    'NONE'),
+                        'div_strength':  res.get('div_strength','NONE'),
+                    }}
+                    active = _make_active_item(updated_item, price, 'auto')
                     new_actives.append(active)
                     active_tickers.add(ticker)
                     add_event('✅', f'{ticker} 자동 Active [{res["grade"]}] @ {price:,.0f}')
                     send_telegram(_fmt_active_msg(active, 'auto'))
                     continue
 
-            item.update({'grade': res['grade'], 'score': res['score'], 'h4_short_k': res.get('h4_short_k'), 'h4_short_d': res.get('h4_short_d'), 'h4_gc': res.get('h4_gc', False), 'h1_short_k': res.get('h1_short_k'), 'h1_short_d': res.get('h1_short_d'), 'h1_gc': res.get('h1_gc', False), 'daily_long_k': res.get('daily_long_k'), 'daily_short_k': res.get('daily_short_k'), 'd_short_cycle': res.get('d_short_cycle'), 'd_mid_cycle': res.get('d_mid_cycle'), 'h4_cycle': res.get('h4_cycle'), 'h1_cycle': res.get('h1_cycle'), 'current_price': price or item.get('current_price'), 'deep_rs_grade': res.get('deep_rs_grade'), 'bull_div': res.get('bull_div'), 'bear_div': res.get('bear_div'), 'hidden_bull': res.get('hidden_bull'), 'div_type': res.get('div_type'), 'div_strength': res.get('div_strength'), 'div_daily': res.get('div_daily'), 'div_h4': res.get('div_h4'), 'div_h1': res.get('div_h1')})
-            sh = item.get('score_history', [])
+            item_u = {**item}
+            item_u.update({
+                'grade':         res['grade'],
+                'score':         res['score'],
+                'h4_short_k':    res.get('h4_short_k'),
+                'h4_short_d':    res.get('h4_short_d'),
+                'h4_gc':         res.get('h4_gc', False),
+                'h1_short_k':    res.get('h1_short_k'),
+                'h1_short_d':    res.get('h1_short_d'),
+                'h1_gc':         res.get('h1_gc', False),
+                'daily_long_k':  res.get('daily_long_k'),
+                'daily_short_k': res.get('daily_short_k'),
+                'd_short_cycle': res.get('d_short_cycle', 'RISING'),
+                'd_mid_cycle':   res.get('d_mid_cycle',   'RISING'),
+                'h4_cycle':      res.get('h4_cycle',       'RISING'),
+                'h1_cycle':      res.get('h1_cycle',       'RISING'),
+                'current_price': price or item.get('current_price'),
+                'price_change':  item.get('price_change', 0.0),
+                'deep_rs_grade': res.get('deep_rs_grade', '-'),
+                'bull_div':      res.get('bull_div',    False),
+                'bear_div':      res.get('bear_div',    False),
+                'hidden_bull':   res.get('hidden_bull', False),
+                'div_type':      res.get('div_type',    'NONE'),
+                'div_strength':  res.get('div_strength','NONE'),
+                'div_daily':     res.get('div_daily',   'NONE'),
+                'div_h4':        res.get('div_h4',      'NONE'),
+                'div_h1':        res.get('div_h1',      'NONE'),
+            })
+            sh = item_u.get('score_history', [])
             sh.append(res['score'])
-            item['score_history'] = sh[-10:]
-            item['rescan_count']  = item.get('rescan_count', 0) + 1
-            updated_watches.append(item)
+            item_u['score_history'] = sh[-10:]
+            item_u['rescan_count']  = item_u.get('rescan_count', 0) + 1
+            updated_watches.append(item_u)
 
         if new_actives:
             actives.extend(new_actives)
